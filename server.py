@@ -1,400 +1,2148 @@
 #!/usr/bin/env python3
 """
-AiiDA-FLEUR EOS MCP Server
-Provides tools for generating aiida-fleur equation-of-state workflow inputs.
+FLEUR workflow MCP server.
+
+Generates runnable aiida-fleur Python scripts for common workflows such as
+SCF, DOS, band structure, EOS, relaxations and magnetic calculations.
 """
 
+from __future__ import annotations
+
+import json
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
-from datetime import datetime
-from typing import Optional
+from pprint import pformat
+from typing import Any
 
-from mcp.server import Server, NotificationOptions
+from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 import mcp.server.stdio
 import mcp.types as types
 
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("aiida-mcp")
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("aiida-mcp.log"),
-        logging.StreamHandler()
-    ]
+        logging.StreamHandler(),
+    ],
 )
+logger = logging.getLogger("fleur-workflow-mcp")
 
 
-class AiidaMCPServer:
-    def __init__(self):
-        self.server = Server("aiida-fleur-eos")
+WORKFLOW_SPECS: dict[str, dict[str, Any]] = {
+    "scf": {
+        "entrypoint": "fleur.scf",
+        "pattern": "direct",
+        "description": "Self-consistent FLEUR workflow from a structure or FleurinpData.",
+    },
+    "eos": {
+        "entrypoint": "fleur.eos",
+        "pattern": "nested_scf",
+        "description": "Equation-of-state workflow using nested SCF calculations.",
+    },
+    "relax": {
+        "entrypoint": "fleur.relax",
+        "pattern": "nested_scf_with_final",
+        "description": "Structure relaxation workflow with optional final SCF.",
+    },
+    "band": {
+        "entrypoint": "fleur.banddos",
+        "pattern": "banddos_like",
+        "default_wf_parameters": {
+            "mode": "band",
+            "kpath": "auto",
+            "klistname": "path-3",
+            "sigma": 0.005,
+            "emin": -0.5,
+            "emax": 0.9,
+            "inpxml_changes": [],
+        },
+        "description": "Band structure workflow using FleurBandDosWorkChain.",
+    },
+    "dos": {
+        "entrypoint": "fleur.banddos",
+        "pattern": "banddos_like",
+        "default_wf_parameters": {
+            "mode": "dos",
+            "sigma": 0.005,
+            "emin": -0.5,
+            "emax": 0.9,
+            "inpxml_changes": [],
+        },
+        "description": "Density-of-states workflow using FleurBandDosWorkChain.",
+    },
+    "mae": {
+        "entrypoint": "fleur.mae",
+        "pattern": "banddos_like",
+        "description": "Magnetic anisotropy energy workflow.",
+    },
+    "ssdisp": {
+        "entrypoint": "fleur.ssdisp",
+        "pattern": "banddos_like",
+        "description": "Spin-spiral dispersion workflow.",
+    },
+    "dmi": {
+        "entrypoint": "fleur.dmi",
+        "pattern": "banddos_like",
+        "description": "Dzyaloshinskii-Moriya interaction workflow.",
+    },
+    "corehole": {
+        "entrypoint": "fleur.corehole",
+        "pattern": "direct",
+        "description": "Core-hole workflow for core-level binding energies.",
+    },
+    "init_cls": {
+        "entrypoint": "fleur.init_cls",
+        "pattern": "direct",
+        "description": "Initial core-level shifts workflow.",
+    },
+    "create_magnetic": {
+        "entrypoint": "fleur.create_magnetic",
+        "pattern": "create_magnetic",
+        "description": "Magnetic film construction workflow for follow-up DMI/MAE/SSDisp studies.",
+    },
+}
+
+
+WORKFLOW_DOC_LINKS = {
+    "scf": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/scf_wc.html",
+    "eos": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/eos_wc.html",
+    "relax": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/relax_wc.html",
+    "band": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/dos_band_wc.html",
+    "dos": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/dos_band_wc.html",
+    "mae": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/mae_wc.html",
+    "ssdisp": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/ssdisp_wc.html",
+    "dmi": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/dmi_wc.html",
+    "corehole": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/corehole_wc.html",
+    "init_cls": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/initial_cls_wc.html",
+    "create_magnetic": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/create_magnetic_wc.html",
+}
+
+
+DEFAULT_OPTIONS = {
+    "resources": {"num_machines": 1, "num_mpiprocs_per_machine": 1},
+    "max_wallclock_seconds": 3600,
+    "withmpi": True,
+}
+
+TRANSPORT_MAP = {
+    "ssh": "core.ssh_async",
+    "local": "core.local",
+    "core.ssh_async": "core.ssh_async",
+    "core.local": "core.local",
+}
+
+SCHEDULER_MAP = {
+    "slurm": "core.slurm",
+    "pbspro": "core.pbspro",
+    "torque": "core.torque",
+    "sge": "core.sge",
+    "lsf": "core.lsf",
+    "direct": "core.direct",
+    "core.slurm": "core.slurm",
+    "core.pbspro": "core.pbspro",
+    "core.torque": "core.torque",
+    "core.sge": "core.sge",
+    "core.lsf": "core.lsf",
+    "core.direct": "core.direct",
+}
+
+SYSTEM_PRESETS = {
+    "jureca": {
+        "label_suffix": "jureca",
+        "hostname": "jureca.fz-juelich.de",
+        "scheduler": "core.slurm",
+        "transport": "core.ssh_async",
+        "docs": {
+            "access": "https://apps.fz-juelich.de/jsc/hps/jureca/access.html",
+            "modules": "https://apps.fz-juelich.de/jsc/hps/jureca/software-modules.html",
+            "batch": "https://apps.fz-juelich.de/jsc/hps/jureca/batchsystem.html",
+            "environment": "https://apps.fz-juelich.de/jsc/hps/jureca/environment.html",
+        },
+        "login_example": "ssh <yourid>@jureca.fz-juelich.de",
+        "module_note": "JURECA uses the JSC hierarchical module environment; start with `module avail`, then load a compiler and MPI stack before searching for FLEUR.",
+        "system_note": "JURECA login nodes are shared and JSC advises not to rely on a specific login node being available.",
+    },
+    "juwels-cluster": {
+        "label_suffix": "juwels-cluster",
+        "hostname": "juwels-cluster.fz-juelich.de",
+        "scheduler": "core.slurm",
+        "transport": "core.ssh_async",
+        "docs": {
+            "access": "https://apps.fz-juelich.de/jsc/hps/juwels/access.html",
+            "modules": "https://apps.fz-juelich.de/jsc/hps/juwels/software-modules.html",
+            "batch": "https://apps.fz-juelich.de/jsc/hps/juwels/batchsystem.html",
+            "environment": "https://apps.fz-juelich.de/jsc/hps/juwels/environment.html",
+        },
+        "login_example": "ssh <yourid>@juwels-cluster.fz-juelich.de",
+        "module_note": "JUWELS uses the same JSC hierarchical module layout as JURECA; discover software with `module avail` and `module spider`.",
+        "system_note": "Use the JUWELS Cluster login host for CPU-side builds and setup tasks.",
+    },
+    "juwels-booster": {
+        "label_suffix": "juwels-booster",
+        "hostname": "juwels-booster.fz-juelich.de",
+        "scheduler": "core.slurm",
+        "transport": "core.ssh_async",
+        "docs": {
+            "access": "https://apps.fz-juelich.de/jsc/hps/juwels/access.html",
+            "modules": "https://apps.fz-juelich.de/jsc/hps/juwels/software-modules.html",
+            "batch": "https://apps.fz-juelich.de/jsc/hps/juwels/batchsystem.html",
+            "environment": "https://apps.fz-juelich.de/jsc/hps/juwels/environment.html",
+        },
+        "login_example": "ssh <yourid>@juwels-booster.fz-juelich.de",
+        "module_note": "JUWELS Booster uses the same JSC module hierarchy, but the installed software set can differ from Cluster.",
+        "system_note": "Use the JUWELS Booster login host if your FLEUR build or runtime is maintained there.",
+    },
+    "jupiter": {
+        "label_suffix": "jupiter",
+        "hostname": "login.jupiter.fz-juelich.de",
+        "scheduler": "core.slurm",
+        "transport": "core.ssh_async",
+        "docs": {
+            "access": "https://apps.fz-juelich.de/jsc/hps/jupiter/access.html",
+            "modules": "https://apps.fz-juelich.de/jsc/hps/jupiter/compile.html",
+            "batch": "https://apps.fz-juelich.de/jsc/hps/jupiter/batchsystem.html",
+            "environment": "https://apps.fz-juelich.de/jsc/hps/jupiter/environment.html",
+            "overview": "https://apps.fz-juelich.de/jsc/hps/jupiter/index.html",
+        },
+        "login_example": "ssh <yourid>@login.jupiter.fz-juelich.de",
+        "module_note": "JUPITER provides compiler and MPI toolchains through modules, but the documentation warns that the system is still evolving and module availability may change.",
+        "system_note": "JUPITER documentation explicitly warns that the system is in pre/early access and details may change.",
+    },
+}
+
+
+class FleurWorkflowMCPServer:
+    def __init__(self) -> None:
+        self.server = Server("fleur-workflows")
         self.templates_dir = Path(__file__).parent / "templates"
         self.setup_handlers()
 
     def _load_template(self, filename: str) -> str:
-        """Load template from file."""
         try:
-            return (self.templates_dir / filename).read_text()
+            return (self.templates_dir / filename).read_text(encoding="utf-8")
         except Exception as exc:
             logger.error("Failed to load template %s: %s", filename, exc)
             return f"Error loading template: {filename}"
 
-    def setup_handlers(self):
-        """Setup all MCP handlers."""
-
-        @self.server.list_resources()
-        async def handle_list_resources() -> list[types.Resource]:
-            return [
-                types.Resource(
-                    uri="aiida://examples/fleur_eos_inputs",
-                    name="FLEUR EOS Inputs Example",
-                    description="Reusable AiiDA builder inputs for aiida-fleur EOS workflows",
-                    mimeType="text/x-python",
-                ),
-                types.Resource(
-                    uri="aiida://examples/fleur_eos_workflow",
-                    name="FLEUR EOS Workflow Example",
-                    description="Runnable aiida-fleur equation-of-state workflow example",
-                    mimeType="text/x-python",
-                ),
-                types.Resource(
-                    uri="aiida://docs/fleur_eos_guide",
-                    name="FLEUR EOS Workflow Documentation",
-                    description="Step-by-step guide for aiida-fleur EOS calculations",
-                    mimeType="text/markdown",
-                ),
-            ]
-
-        @self.server.read_resource()
-        async def handle_read_resource(uri: str) -> str:
-            if uri == "aiida://examples/fleur_eos_inputs":
-                return self.get_fleur_eos_inputs_template()
-            if uri == "aiida://examples/fleur_eos_workflow":
-                return self.get_fleur_eos_workflow_template()
-            if uri == "aiida://docs/fleur_eos_guide":
-                return self.get_fleur_eos_guide()
-            raise ValueError(f"Unknown resource: {uri}")
-
-        @self.server.list_tools()
-        async def handle_list_tools() -> list[types.Tool]:
-            return [
-                types.Tool(
-                    name="generate_fleur_eos_inputs",
-                    description="Generate reusable AiiDA inputs for the aiida-fleur equation-of-state workflow",
-                    inputSchema=self._fleur_eos_schema(),
-                ),
-                types.Tool(
-                    name="generate_fleur_eos_script",
-                    description="Generate a runnable Python script for aiida-fleur equation-of-state calculation",
-                    inputSchema=self._fleur_eos_schema(),
-                ),
-                types.Tool(
-                    name="execute_calculation",
-                    description="Execute a generated aiida-fleur EOS calculation script with verdi run",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "script_path": {
-                                "type": "string",
-                                "description": "Path to the Python script"
-                            }
-                        },
-                        "required": ["script_path"]
-                    }
-                ),
-                types.Tool(
-                    name="check_calculation_status",
-                    description="Check status of running AiiDA calculations",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "process_id": {
-                                "type": "string",
-                                "description": "Optional process ID to check a specific calculation"
-                            }
-                        },
-                        "required": []
-                    }
-                ),
-            ]
-
-        @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-            if name == "generate_fleur_eos_inputs":
-                return await self.generate_fleur_eos_inputs(**arguments)
-            if name == "generate_fleur_eos_script":
-                return await self.generate_fleur_eos_script(**arguments)
-            if name == "execute_calculation":
-                return await self.execute_calculation(arguments["script_path"])
-            if name == "check_calculation_status":
-                return await self.check_calculation_status(arguments.get("process_id"))
-            raise ValueError(f"Unknown tool: {name}")
-
-    def _fleur_eos_schema(self) -> dict:
+    def _workflow_schema(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {
-                "material": {"type": "string"},
-                "structure_file": {"type": "string"},
+                "workflow": {
+                    "type": "string",
+                    "enum": sorted(WORKFLOW_SPECS.keys()),
+                    "description": "Which aiida-fleur workflow script to generate.",
+                },
+                "material": {
+                    "type": "string",
+                    "description": "Short label used in file names and log output.",
+                },
+                "structure_file": {
+                    "type": "string",
+                    "description": "Path to a CIF or any structure file ASE can read.",
+                },
                 "inpgen_code": {
                     "type": "string",
-                    "default": "inpgen@localhost"
+                    "default": "inpgen@localhost",
+                    "description": "AiiDA code label for the inpgen executable.",
                 },
                 "fleur_code": {
                     "type": "string",
-                    "default": "fleur@localhost"
+                    "default": "fleur@localhost",
+                    "description": "AiiDA code label for the fleur executable.",
                 },
-                "points": {
-                    "type": "integer",
-                    "default": 9
-                },
-                "step": {
-                    "type": "number",
-                    "default": 0.002
-                },
-                "guess": {
-                    "type": "number",
-                    "default": 1.0
-                },
-                "fleur_runmax": {
-                    "type": "integer",
-                    "default": 4
-                },
-                "itmax_per_run": {
-                    "type": "integer",
-                    "default": 30
-                },
-                "density_converged": {
-                    "type": "number",
-                    "default": 0.0002
-                },
-                "num_machines": {
-                    "type": "integer",
-                    "default": 1
-                },
-                "num_mpiprocs_per_machine": {
-                    "type": "integer",
-                    "default": 1
-                },
-                "max_wallclock_seconds": {
-                    "type": "integer",
-                    "default": 3600
-                },
-                "queue_name": {
+                "output_dir": {
                     "type": "string",
-                    "default": ""
-                }
+                    "default": ".",
+                    "description": "Directory where the generated script will be written.",
+                },
+                "script_filename": {
+                    "type": "string",
+                    "description": "Optional custom file name for the generated script.",
+                },
+                "submit_mode": {
+                    "type": "string",
+                    "enum": ["submit", "run_get_node"],
+                    "default": "submit",
+                    "description": "Whether the generated script submits or blocks until completion.",
+                },
+                "options": {
+                    "type": "object",
+                    "description": "AiiDA scheduler/resource options for FLEUR runs.",
+                    "default": {},
+                },
+                "workflow_parameters": {
+                    "type": "object",
+                    "description": "Top-level wf_parameters for the selected workflow.",
+                    "default": {},
+                },
+                "calc_parameters": {
+                    "type": "object",
+                    "description": "Inpgen/calc_parameters for direct structure-based workflows.",
+                    "default": {},
+                },
+                "scf_workflow_parameters": {
+                    "type": "object",
+                    "description": "wf_parameters for nested SCF workflows.",
+                    "default": {},
+                },
+                "final_scf_workflow_parameters": {
+                    "type": "object",
+                    "description": "wf_parameters for the final_scf namespace in relax workflows.",
+                    "default": {},
+                },
+                "magnetism": {
+                    "type": "object",
+                    "description": "Basic magnetic setup helper. Adds common inpxml_changes for collinear/noncollinear/spin-spiral setups.",
+                    "default": {},
+                },
+                "plot_results": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, the generated script will call plot_fleur when possible.",
+                },
             },
-            "required": ["material", "structure_file"]
+            "required": ["workflow", "material"],
         }
 
-    async def generate_fleur_eos_inputs(
-        self,
-        material: str,
-        structure_file: str,
-        inpgen_code: str = "inpgen@localhost",
-        fleur_code: str = "fleur@localhost",
-        points: int = 9,
-        step: float = 0.002,
-        guess: float = 1.0,
-        fleur_runmax: int = 4,
-        itmax_per_run: int = 30,
-        density_converged: float = 0.0002,
-        num_machines: int = 1,
-        num_mpiprocs_per_machine: int = 1,
-        max_wallclock_seconds: int = 3600,
-        queue_name: str = ""
-    ) -> list[types.TextContent]:
-        """Generate reusable AiiDA inputs for aiida-fleur EOS workflow."""
-        inputs_template = self._load_template("fleur_eos_inputs_template.py")
-        inputs_content = inputs_template.format(
-            material=material,
-            structure_file=structure_file,
-            inpgen_code=inpgen_code,
-            fleur_code=fleur_code,
-            points=points,
-            step=step,
-            guess=guess,
-            fleur_runmax=fleur_runmax,
-            itmax_per_run=itmax_per_run,
-            density_converged=density_converged,
-            num_machines=num_machines,
-            num_mpiprocs_per_machine=num_mpiprocs_per_machine,
-            max_wallclock_seconds=max_wallclock_seconds,
-            queue_name=queue_name
-        )
+    def _plot_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "node_identifiers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of PKs or UUIDs to plot with plot_fleur.",
+                },
+                "output_dir": {
+                    "type": "string",
+                    "default": ".",
+                },
+                "script_filename": {
+                    "type": "string",
+                    "default": "plot_fleur_results.py",
+                },
+            },
+            "required": ["node_identifiers"],
+        }
 
-        queue_name_display = queue_name or "<none>"
+    def _execute_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "script_path": {
+                    "type": "string",
+                    "description": "Path to a generated aiida-fleur Python script.",
+                },
+                "verdi_command": {
+                    "type": "string",
+                    "default": "verdi",
+                    "description": "Command used to run the local AiiDA CLI.",
+                },
+            },
+            "required": ["script_path"],
+        }
 
-        return [types.TextContent(
-            type="text",
-            text=f"AiiDA EOS inputs for {material}:\n\n{inputs_content}\n\n"
-                 f"Summary:\n"
-                 f"- Structure: {structure_file}\n"
-                 f"- inpgen code: {inpgen_code}\n"
-                 f"- fleur code: {fleur_code}\n"
-                 f"- EOS points: {points}\n"
-                 f"- EOS step: {step}\n"
-                 f"- EOS guess: {guess}\n"
-                 f"- fleur_runmax: {fleur_runmax}\n"
-                 f"- itmax_per_run: {itmax_per_run}\n"
-                 f"- density_converged: {density_converged}\n"
-                 f"- resources: {num_machines} machine(s), "
-                 f"{num_mpiprocs_per_machine} MPI proc(s) per machine\n"
-                 f"- queue_name: {queue_name_display}\n"
-                 f"- max_wallclock_seconds: {max_wallclock_seconds}"
-        )]
+    def _process_list_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "verdi_command": {
+                    "type": "string",
+                    "default": "verdi",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 10,
+                },
+                "all_entries": {
+                    "type": "boolean",
+                    "default": True,
+                },
+                "process_label": {
+                    "type": "string",
+                    "description": "Optional process label filter.",
+                },
+            },
+            "required": [],
+        }
 
-    async def generate_fleur_eos_script(
-        self,
-        material: str,
-        structure_file: str,
-        inpgen_code: str = "inpgen@localhost",
-        fleur_code: str = "fleur@localhost",
-        points: int = 9,
-        step: float = 0.002,
-        guess: float = 1.0,
-        fleur_runmax: int = 4,
-        itmax_per_run: int = 30,
-        density_converged: float = 0.0002,
-        num_machines: int = 1,
-        num_mpiprocs_per_machine: int = 1,
-        max_wallclock_seconds: int = 3600,
-        queue_name: str = ""
-    ) -> list[types.TextContent]:
-        """Generate a runnable Python script for aiida-fleur EOS calculation."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        script_name = f"fleur_eos_calculation_{material}_{timestamp}.py"
+    def _process_status_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "identifier": {
+                    "type": "string",
+                    "description": "Process PK or UUID.",
+                },
+                "verdi_command": {
+                    "type": "string",
+                    "default": "verdi",
+                },
+                "include_report": {
+                    "type": "boolean",
+                    "default": True,
+                },
+                "max_report_lines": {
+                    "type": "integer",
+                    "default": 40,
+                },
+            },
+            "required": ["identifier"],
+        }
 
-        script_template = self._load_template("fleur_eos_script_template.py")
-        script_content = script_template.format(
-            material=material,
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            structure_file=structure_file,
-            inpgen_code=inpgen_code,
-            fleur_code=fleur_code,
-            points=points,
-            step=step,
-            guess=guess,
-            fleur_runmax=fleur_runmax,
-            itmax_per_run=itmax_per_run,
-            density_converged=density_converged,
-            num_machines=num_machines,
-            num_mpiprocs_per_machine=num_mpiprocs_per_machine,
-            max_wallclock_seconds=max_wallclock_seconds,
-            queue_name=queue_name
-        )
+    def _output_inspection_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "identifier": {
+                    "type": "string",
+                    "description": "Process PK or UUID.",
+                },
+                "verdi_command": {
+                    "type": "string",
+                    "default": "verdi",
+                },
+                "include_extras": {
+                    "type": "boolean",
+                    "default": False,
+                },
+                "include_attributes": {
+                    "type": "boolean",
+                    "default": True,
+                },
+            },
+            "required": ["identifier"],
+        }
 
-        script_path = Path.cwd() / script_name
-        script_path.write_text(script_content)
-        script_path.chmod(0o755)
+    def _setup_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "computer_label": {
+                    "type": "string",
+                    "description": "AiiDA label for the remote computer.",
+                },
+                "system_preset": {
+                    "type": "string",
+                    "enum": sorted(SYSTEM_PRESETS.keys()),
+                    "description": "Optional named supercomputer preset. Fills in hostname, scheduler and transport defaults and adds system-specific setup steps.",
+                },
+                "hostname": {
+                    "type": "string",
+                    "description": "SSH hostname of the supercomputer login node.",
+                },
+                "scheduler": {
+                    "type": "string",
+                    "enum": ["slurm", "pbspro", "torque", "sge", "lsf", "direct", "core.slurm", "core.pbspro", "core.torque", "core.sge", "core.lsf", "core.direct"],
+                    "default": "slurm",
+                    "description": "Scheduler type used on the remote computer.",
+                },
+                "transport": {
+                    "type": "string",
+                    "enum": ["ssh", "local", "core.ssh_async", "core.local"],
+                    "default": "ssh",
+                    "description": "AiiDA transport type.",
+                },
+                "work_dir": {
+                    "type": "string",
+                    "default": "/scratch/{username}/aiida_run/",
+                    "description": "Remote work directory for AiiDA calculations.",
+                },
+                "mpirun_command": {
+                    "type": "string",
+                    "default": "srun -n {tot_num_mpiprocs}",
+                    "description": "MPI launcher command for the remote scheduler.",
+                },
+                "default_memory_per_machine_mb": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Optional default memory per machine in MB. Use 0 to omit.",
+                },
+                "prepend_text": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Module loads or environment setup inserted into the AiiDA computer prepend text.",
+                },
+                "append_text": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional cleanup/postamble text for the AiiDA computer.",
+                },
+                "description": {
+                    "type": "string",
+                    "default": "Remote machine for aiida-fleur calculations",
+                    "description": "Human-readable description for the AiiDA computer.",
+                },
+                "use_double_quotes": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Whether verdi should escape values using double quotes.",
+                },
+                "ssh_username": {
+                    "type": "string",
+                    "description": "SSH username for `verdi computer configure` examples.",
+                },
+                "ssh_port": {
+                    "type": "integer",
+                    "default": 22,
+                    "description": "SSH port for the configure command.",
+                },
+                "ssh_proxy_jump": {
+                    "type": "string",
+                    "description": "Optional SSH proxy jump host.",
+                },
+                "safe_interval": {
+                    "type": "integer",
+                    "default": 30,
+                    "description": "AiiDA safe interval in seconds.",
+                },
+                "inpgen_code_label": {
+                    "type": "string",
+                    "default": "inpgen",
+                    "description": "Label for the registered inpgen code.",
+                },
+                "fleur_code_label": {
+                    "type": "string",
+                    "default": "fleur",
+                    "description": "Label for the registered fleur code.",
+                },
+                "inpgen_executable_path": {
+                    "type": "string",
+                    "description": "Absolute path to the inpgen executable on the remote computer.",
+                },
+                "fleur_executable_path": {
+                    "type": "string",
+                    "description": "Absolute path to the fleur executable on the remote computer.",
+                },
+                "code_description": {
+                    "type": "string",
+                    "default": "FLEUR executable registered for aiida-fleur",
+                    "description": "Description shared by the generated code commands.",
+                },
+                "input_plugin_inpgen": {
+                    "type": "string",
+                    "default": "fleur.inpgen",
+                    "description": "Input plugin name for inpgen code registration.",
+                },
+                "input_plugin_fleur": {
+                    "type": "string",
+                    "default": "fleur.fleur",
+                    "description": "Input plugin name for fleur code registration.",
+                },
+                "output_dir": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Directory where the setup guide should be written.",
+                },
+                "filename": {
+                    "type": "string",
+                    "default": "aiida_fleur_setup_guide.md",
+                    "description": "File name for the generated setup guide.",
+                },
+                "project_path": {
+                    "type": "string",
+                    "description": "Optional filesystem path or project directory on the supercomputer used in examples for work and code locations.",
+                },
+                "fleur_module_hint": {
+                    "type": "string",
+                    "default": "fleur",
+                    "description": "Module name hint used in the guide when searching for FLEUR-related modules.",
+                },
+                "verdi_command": {
+                    "type": "string",
+                    "default": "verdi",
+                    "description": "Command used to run the local AiiDA CLI.",
+                },
+                "apply": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, actually run the verdi setup commands locally.",
+                },
+                "replace_existing": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, delete and recreate existing computer/code entries with the same labels.",
+                },
+                "test_computer": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Run `verdi computer test` after setup.",
+                },
+                "test_codes": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Run `verdi code test` for the created codes when possible.",
+                },
+            },
+            "required": [],
+        }
 
-        queue_name_display = queue_name or "<none>"
+    @staticmethod
+    def _as_pretty_python(value: Any) -> str:
+        return pformat(value, sort_dicts=False, width=100)
 
-        return [types.TextContent(
-            type="text",
-            text=f"Generated script: {script_path}\n\nScript saved with parameters:\n"
-                 f"- Material: {material}\n"
-                 f"- Structure: {structure_file}\n"
-                 f"- inpgen code: {inpgen_code}\n"
-                 f"- fleur code: {fleur_code}\n"
-                 f"- EOS points: {points}\n"
-                 f"- EOS step: {step}\n"
-                 f"- EOS guess: {guess}\n"
-                 f"- fleur_runmax: {fleur_runmax}\n"
-                 f"- itmax_per_run: {itmax_per_run}\n"
-                 f"- density_converged: {density_converged}\n"
-                 f"- resources: {num_machines} machine(s), "
-                 f"{num_mpiprocs_per_machine} MPI proc(s) per machine\n"
-                 f"- queue_name: {queue_name_display}\n"
-                 f"- max_wallclock_seconds: {max_wallclock_seconds}"
-        )]
+    @staticmethod
+    def _merge_dicts(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
+        merged = dict(base)
+        if override:
+            merged.update(override)
+        return merged
 
-    async def execute_calculation(self, script_path: str) -> list[types.TextContent]:
-        """Execute a generated aiida-fleur EOS calculation script."""
+    @staticmethod
+    def _script_name(material: str, workflow: str, script_filename: str | None) -> str:
+        if script_filename:
+            return script_filename
+        clean_material = material.replace(" ", "_").replace("/", "_")
+        return f"{workflow}_{clean_material}.py"
+
+    @staticmethod
+    def _shell_quote(value: str) -> str:
+        return json.dumps(value) if "\n" in value else repr(value)
+
+    @staticmethod
+    def _normalize_transport(value: str) -> str:
         try:
-            result = subprocess.run(
-                ["verdi", "run", script_path],
-                capture_output=True,
-                text=True
+            return TRANSPORT_MAP[value]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported transport: {value}") from exc
+
+    @staticmethod
+    def _normalize_scheduler(value: str) -> str:
+        try:
+            return SCHEDULER_MAP[value]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported scheduler: {value}") from exc
+
+    def _missing_setup_fields(self, arguments: dict[str, Any]) -> list[str]:
+        if arguments.get("system_preset") and not arguments.get("computer_label"):
+            required = ["computer_label"]
+        else:
+            required = [
+                "computer_label",
+                "hostname",
+                "inpgen_executable_path",
+                "fleur_executable_path",
+            ]
+        transport = arguments.get("transport", "ssh")
+        preset_name = arguments.get("system_preset")
+        if preset_name and preset_name in SYSTEM_PRESETS:
+            preset = SYSTEM_PRESETS[preset_name]
+            if not arguments.get("hostname"):
+                arguments["hostname"] = preset["hostname"]
+            if not arguments.get("transport"):
+                arguments["transport"] = preset["transport"]
+            transport = arguments.get("transport", preset["transport"])
+        normalized_transport = TRANSPORT_MAP.get(transport, transport)
+        if normalized_transport == "core.ssh_async" and not arguments.get("ssh_username"):
+            required.append("ssh_username")
+        return [field for field in required if not arguments.get(field)]
+
+    def _apply_system_preset(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        preset_name = arguments.get("system_preset")
+        if not preset_name:
+            return arguments
+        preset = SYSTEM_PRESETS.get(preset_name)
+        if not preset:
+            raise ValueError(f"Unknown system preset: {preset_name}")
+
+        merged = dict(arguments)
+        if not merged.get("hostname"):
+            merged["hostname"] = preset["hostname"]
+        if not merged.get("scheduler"):
+            merged["scheduler"] = preset["scheduler"]
+        if not merged.get("transport"):
+            merged["transport"] = preset["transport"]
+        if not merged.get("computer_label"):
+            merged["computer_label"] = preset["label_suffix"]
+        return merged
+
+    @staticmethod
+    def _yaml_literal(key: str, value: str) -> str:
+        if "\n" in value:
+            indented = "\n".join(f"  {line}" for line in value.splitlines())
+            return f"{key}: |\n{indented}\n"
+        return f"{key}: {json.dumps(value)}\n"
+
+    def _build_computer_config_yaml(
+        self,
+        computer_label: str,
+        hostname: str,
+        transport: str,
+        scheduler: str,
+        work_dir: str,
+        mpirun_command: str,
+        default_memory_per_machine_mb: int,
+        prepend_text: str,
+        append_text: str,
+        description: str,
+    ) -> str:
+        text = ""
+        text += self._yaml_literal("label", computer_label)
+        text += self._yaml_literal("hostname", hostname)
+        text += self._yaml_literal("description", description)
+        text += self._yaml_literal("transport", self._normalize_transport(transport))
+        text += self._yaml_literal("scheduler", self._normalize_scheduler(scheduler))
+        text += self._yaml_literal("work_dir", work_dir)
+        text += self._yaml_literal("mpirun_command", mpirun_command)
+        if default_memory_per_machine_mb > 0:
+            text += f"default_memory_per_machine: {default_memory_per_machine_mb}\n"
+        text += self._yaml_literal("prepend_text", prepend_text)
+        text += self._yaml_literal("append_text", append_text)
+        return text
+
+    def _build_code_config_yaml(
+        self,
+        label: str,
+        description: str,
+        default_calc_job_plugin: str,
+        filepath_executable: str,
+        computer_label: str,
+        with_mpi: bool | None,
+    ) -> str:
+        text = ""
+        text += self._yaml_literal("label", label)
+        text += self._yaml_literal("description", description)
+        text += self._yaml_literal("default_calc_job_plugin", default_calc_job_plugin)
+        text += self._yaml_literal("filepath_executable", filepath_executable)
+        text += self._yaml_literal("computer", computer_label)
+        if with_mpi is True:
+            text += "with_mpi: true\n"
+        elif with_mpi is False:
+            text += "with_mpi: false\n"
+        return text
+
+    def _run_local_command(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(command, capture_output=True, text=True)
+
+    def _object_exists(self, verdi_command: str, kind: str, label: str) -> bool:
+        result = self._run_local_command([verdi_command, kind, "show", label])
+        return result.returncode == 0
+
+    def _delete_existing_object(self, verdi_command: str, kind: str, label: str) -> subprocess.CompletedProcess[str]:
+        if kind == "computer":
+            return self._run_local_command([verdi_command, "computer", "delete", "--force", label])
+        if kind == "code":
+            return self._run_local_command([verdi_command, "code", "delete", "--force", label])
+        raise ValueError(f"Unsupported object kind: {kind}")
+
+    def _build_setup_guide(
+        self,
+        system_preset: str | None,
+        computer_label: str,
+        hostname: str,
+        scheduler: str,
+        transport: str,
+        work_dir: str,
+        mpirun_command: str,
+        default_memory_per_machine_mb: int,
+        prepend_text: str,
+        append_text: str,
+        description: str,
+        use_double_quotes: bool,
+        ssh_username: str | None,
+        ssh_port: int,
+        ssh_proxy_jump: str | None,
+        safe_interval: int,
+        inpgen_code_label: str,
+        fleur_code_label: str,
+        inpgen_executable_path: str,
+        fleur_executable_path: str,
+        code_description: str,
+        input_plugin_inpgen: str,
+        input_plugin_fleur: str,
+        project_path: str | None,
+        fleur_module_hint: str,
+    ) -> str:
+        normalized_transport = self._normalize_transport(transport)
+        normalized_scheduler = self._normalize_scheduler(scheduler)
+        preset = SYSTEM_PRESETS.get(system_preset) if system_preset else None
+        quote_option = "--use-double-quotes" if use_double_quotes else ""
+        memory_line = (
+            f"  --default-memory-per-machine {default_memory_per_machine_mb} \\\n"
+            if default_memory_per_machine_mb > 0
+            else ""
+        )
+        prepend_arg = self._shell_quote(prepend_text) if prepend_text else "''"
+        append_arg = self._shell_quote(append_text) if append_text else "''"
+        configure_bits = [
+            f"verdi computer configure {normalized_transport}",
+            "  --non-interactive",
+            f"  --safe-interval {safe_interval}",
+        ]
+        if ssh_username:
+            configure_bits.append(f"  --username {ssh_username}")
+        if ssh_port:
+            configure_bits.append(f"  --port {ssh_port}")
+        if ssh_proxy_jump:
+            configure_bits.append(f"  --proxy-jump {ssh_proxy_jump}")
+        configure_bits.append(f"  {computer_label}")
+        configure_command = " \\\n".join(configure_bits)
+        project_path_display = project_path or "<your_project_path>"
+        remote_code_dir = f"{project_path_display.rstrip('/')}/codes/fleur"
+        preset_section = ""
+        if preset:
+            docs_lines = []
+            for key, value in preset["docs"].items():
+                docs_lines.append(f"- {key}: {value}")
+            preset_section = f"""
+## 0. System-specific steps for `{system_preset}`
+
+- Recommended login host: `{preset["hostname"]}`
+- SSH example: `{preset["login_example"]}`
+- Note: {preset["system_note"]}
+- Module note: {preset["module_note"]}
+
+Official documentation:
+{chr(10).join(docs_lines)}
+
+### 0.1 Prepare SSH access
+
+1. Generate or select an SSH key on your local machine.
+2. Upload the public key in JuDoor for `{system_preset}`.
+3. If your site policy requires source restrictions or MFA/TOTP, complete those steps in JuDoor before continuing.
+4. Test the login manually:
+
+```bash
+{preset["login_example"]}
+```
+
+### 0.2 Inspect the software environment on the supercomputer
+
+After login, inspect the module hierarchy and search for FLEUR:
+
+```bash
+module avail
+module spider {fleur_module_hint}
+module keyword {fleur_module_hint}
+```
+
+Then load the relevant compiler/MPI stack and the FLEUR module if available:
+
+```bash
+module load Stages
+module load GCC
+module load ParaStationMPI
+module load {fleur_module_hint}
+```
+
+If FLEUR is not installed as a module, use your own build and record the executable paths, for example under:
+
+```bash
+mkdir -p {remote_code_dir}
+```
+
+### 0.3 Record the executable paths for AiiDA
+
+Locate the executables you want AiiDA to register:
+
+```bash
+which inpgen
+which fleur_MPI
+which fleur
+```
+
+Use the resulting absolute paths as `inpgen_executable_path` and `fleur_executable_path`.
+"""
+
+        return f"""# AiiDA FLEUR Supercomputer Setup Guide
+
+This guide configures an AiiDA computer and registers `inpgen` and `fleur`
+codes for `aiida-fleur`.
+
+{preset_section}
+
+## 1. Prerequisites
+
+- AiiDA profile already created locally
+- passwordless SSH access to `{hostname}`
+- working remote executables:
+  - `inpgen`: `{inpgen_executable_path or '<discover with which inpgen>'}`
+  - `fleur`: `{fleur_executable_path or '<discover with which fleur_MPI>'}`
+
+## 2. Create the AiiDA computer
+
+```bash
+verdi computer setup {quote_option} \\
+  --non-interactive \\
+  --label {computer_label} \\
+  --hostname {hostname} \\
+  --description {self._shell_quote(description)} \\
+  --transport {normalized_transport} \\
+  --scheduler {normalized_scheduler} \\
+  --work-dir {self._shell_quote(work_dir)} \\
+  --mpirun-command {self._shell_quote(mpirun_command)} \\
+{memory_line}  --prepend-text {prepend_arg} \\
+  --append-text {append_arg}
+```
+
+## 3. Configure SSH access in AiiDA
+
+```bash
+{configure_command}
+```
+
+## 4. Test the computer
+
+```bash
+verdi computer test {computer_label}
+```
+
+## 5. Register the inpgen code
+
+```bash
+verdi code create core.code.installed {quote_option} \\
+  --non-interactive \\
+  --label {inpgen_code_label}@{computer_label} \\
+  --computer {computer_label} \\
+  --filepath-executable {inpgen_executable_path or '<absolute_path_to_inpgen>'} \\
+  --default-calc-job-plugin {input_plugin_inpgen} \\
+  --no-with-mpi \\
+  --description {self._shell_quote(code_description)}
+```
+
+## 6. Register the fleur code
+
+```bash
+verdi code create core.code.installed {quote_option} \\
+  --non-interactive \\
+  --label {fleur_code_label}@{computer_label} \\
+  --computer {computer_label} \\
+  --filepath-executable {fleur_executable_path or '<absolute_path_to_fleur_or_fleur_MPI>'} \\
+  --default-calc-job-plugin {input_plugin_fleur} \\
+  --with-mpi \\
+  --description {self._shell_quote(code_description)}
+```
+
+## 7. Test that the codes are visible
+
+```bash
+verdi code list
+verdi code show {inpgen_code_label}@{computer_label}
+verdi code show {fleur_code_label}@{computer_label}
+```
+
+## 8. Recommended next checks
+
+```bash
+verdi status
+verdi computer show {computer_label}
+verdi computer test {computer_label}
+```
+
+## 9. Example prepend text
+
+Use this if your supercomputer needs module loads or environment activation:
+
+```bash
+module purge
+module load fleur
+module load mpi
+export OMP_NUM_THREADS=1
+```
+"""
+
+    def _build_workflow_script(
+        self,
+        workflow: str,
+        material: str,
+        structure_file: str | None,
+        inpgen_code: str,
+        fleur_code: str,
+        submit_mode: str,
+        options: dict[str, Any],
+        workflow_parameters: dict[str, Any],
+        calc_parameters: dict[str, Any],
+        scf_workflow_parameters: dict[str, Any],
+        final_scf_workflow_parameters: dict[str, Any],
+        magnetism: dict[str, Any],
+        plot_results: bool,
+    ) -> str:
+        spec = WORKFLOW_SPECS[workflow]
+        top_wf = self._merge_dicts(spec.get("default_wf_parameters", {}), workflow_parameters)
+        top_options = self._merge_dicts(DEFAULT_OPTIONS, options)
+
+        config = {
+            "material": material,
+            "workflow": workflow,
+            "entrypoint": spec["entrypoint"],
+            "pattern": spec["pattern"],
+            "structure_file": str(Path(structure_file).expanduser().resolve()) if structure_file else None,
+            "inpgen_code": inpgen_code,
+            "fleur_code": fleur_code,
+            "submit_mode": submit_mode,
+            "plot_results": plot_results,
+            "options": top_options,
+            "workflow_parameters": top_wf,
+            "calc_parameters": calc_parameters or {},
+            "scf_workflow_parameters": scf_workflow_parameters or {},
+            "final_scf_workflow_parameters": final_scf_workflow_parameters or {},
+            "magnetism": magnetism or {},
+        }
+
+        config_block = self._as_pretty_python(config)
+        workflow_link = WORKFLOW_DOC_LINKS[workflow]
+
+        return f'''#!/usr/bin/env python3
+"""
+Generated aiida-fleur workflow script for {material}.
+
+Workflow: {workflow}
+Entrypoint: {spec["entrypoint"]}
+Docs: {workflow_link}
+"""
+
+from pathlib import Path
+from pprint import pprint
+
+from aiida import load_profile, orm
+from aiida.engine import run_get_node, submit
+from aiida.plugins import WorkflowFactory
+from ase.io import read
+
+from aiida_fleur.data import inpxml_changes
+from aiida_fleur.tools.plot import plot_fleur
+
+
+CONFIG = {config_block}
+
+
+def make_structure_node():
+    structure_path = CONFIG.get("structure_file")
+    if not structure_path:
+        return None
+    atoms = read(structure_path)
+    magnetic_moments = CONFIG["magnetism"].get("initial_moments")
+    if magnetic_moments:
+        atoms.set_initial_magnetic_moments(magnetic_moments)
+    return orm.StructureData(ase=atoms)
+
+
+def maybe_dict_node(data):
+    return orm.Dict(dict=data) if data else None
+
+
+def build_common_options():
+    return orm.Dict(dict=CONFIG["options"])
+
+
+def apply_basic_magnetism(wf_parameters):
+    magnetism = CONFIG.get("magnetism", {{}})
+    if not magnetism:
+        return wf_parameters
+
+    mode = magnetism.get("mode", "none")
+    extra_changes = magnetism.get("inpxml_changes", [])
+
+    with inpxml_changes(wf_parameters) as fm:
+        if mode in ("collinear", "noncollinear", "spin_spiral"):
+            fm.set_inpchanges({{"jspins": 2}})
+        if mode == "collinear":
+            fm.set_inpchanges({{"l_noco": False}})
+        elif mode == "noncollinear":
+            fm.set_inpchanges({{"l_noco": True}})
+        elif mode == "spin_spiral":
+            fm.set_inpchanges({{"l_noco": True, "l_ss": True}})
+            qss = magnetism.get("qss")
+            if qss:
+                fm.set_inpchanges({{"qss": " ".join(str(value) for value in qss)}})
+
+        if magnetism.get("soc") is True:
+            fm.set_inpchanges({{"l_soc": True}})
+        elif magnetism.get("soc") is False:
+            fm.set_inpchanges({{"l_soc": False}})
+
+        for change in extra_changes:
+            if isinstance(change, (list, tuple)) and len(change) == 2:
+                method_name, kwargs = change
+                getattr(fm, method_name)(**kwargs)
+
+    return wf_parameters
+
+
+def build_scf_namespace(include_structure):
+    namespace = {{}}
+    if include_structure:
+        structure = make_structure_node()
+        if structure is not None:
+            namespace["structure"] = structure
+
+    namespace["inpgen"] = orm.load_code(CONFIG["inpgen_code"])
+    namespace["fleur"] = orm.load_code(CONFIG["fleur_code"])
+
+    calc_parameters = maybe_dict_node(CONFIG["calc_parameters"])
+    if calc_parameters is not None:
+        namespace["calc_parameters"] = calc_parameters
+
+    wf_parameters = CONFIG.get("scf_workflow_parameters", {{}})
+    if wf_parameters:
+        wf_parameters = apply_basic_magnetism(dict(wf_parameters))
+        namespace["wf_parameters"] = orm.Dict(dict=wf_parameters)
+
+    namespace["options"] = build_common_options()
+    return namespace
+
+
+def build_direct_builder():
+    WorkChain = WorkflowFactory(CONFIG["entrypoint"])
+    builder = WorkChain.get_builder()
+
+    structure = make_structure_node()
+    if structure is not None:
+        builder.structure = structure
+
+    builder.inpgen = orm.load_code(CONFIG["inpgen_code"])
+    builder.fleur = orm.load_code(CONFIG["fleur_code"])
+    builder.options = build_common_options()
+
+    calc_parameters = maybe_dict_node(CONFIG["calc_parameters"])
+    if calc_parameters is not None:
+        builder.calc_parameters = calc_parameters
+
+    wf_parameters = dict(CONFIG.get("workflow_parameters", {{}}))
+    if wf_parameters or CONFIG.get("magnetism"):
+        wf_parameters = apply_basic_magnetism(wf_parameters)
+        builder.wf_parameters = orm.Dict(dict=wf_parameters)
+
+    return builder
+
+
+def build_nested_scf_builder():
+    WorkChain = WorkflowFactory(CONFIG["entrypoint"])
+    builder = WorkChain.get_builder()
+
+    structure = make_structure_node()
+    if structure is not None:
+        builder.structure = structure
+
+    wf_parameters = dict(CONFIG.get("workflow_parameters", {{}}))
+    if wf_parameters or CONFIG.get("magnetism"):
+        wf_parameters = apply_basic_magnetism(wf_parameters)
+        builder.wf_parameters = orm.Dict(dict=wf_parameters)
+
+    builder.scf = build_scf_namespace(include_structure=False)
+    return builder
+
+
+def build_nested_scf_with_final_builder():
+    WorkChain = WorkflowFactory(CONFIG["entrypoint"])
+    builder = WorkChain.get_builder()
+    builder.scf = build_scf_namespace(include_structure=True)
+
+    wf_parameters = dict(CONFIG.get("workflow_parameters", {{}}))
+    if wf_parameters or CONFIG.get("magnetism"):
+        wf_parameters = apply_basic_magnetism(wf_parameters)
+        builder.wf_parameters = orm.Dict(dict=wf_parameters)
+
+    final_scf = CONFIG.get("final_scf_workflow_parameters", {{}})
+    if final_scf:
+        builder.final_scf = {{"wf_parameters": orm.Dict(dict=final_scf)}}
+
+    return builder
+
+
+def build_banddos_like_builder():
+    WorkChain = WorkflowFactory(CONFIG["entrypoint"])
+    builder = WorkChain.get_builder()
+    builder.fleur = orm.load_code(CONFIG["fleur_code"])
+    builder.options = build_common_options()
+
+    wf_parameters = dict(CONFIG.get("workflow_parameters", {{}}))
+    if wf_parameters or CONFIG.get("magnetism"):
+        wf_parameters = apply_basic_magnetism(wf_parameters)
+        builder.wf_parameters = orm.Dict(dict=wf_parameters)
+
+    if CONFIG.get("structure_file"):
+        builder.scf = build_scf_namespace(include_structure=True)
+    return builder
+
+
+def build_create_magnetic_builder():
+    WorkChain = WorkflowFactory(CONFIG["entrypoint"])
+    builder = WorkChain.get_builder()
+
+    wf_parameters = dict(CONFIG.get("workflow_parameters", {{}}))
+    if wf_parameters:
+        builder.wf_parameters = orm.Dict(dict=wf_parameters)
+
+    # This workflow is film-specific and nests EOS and Relax workflows.
+    # Edit the dictionaries below for your substrate/film problem.
+    eos_scf = build_scf_namespace(include_structure=False)
+    relax_scf = build_scf_namespace(include_structure=False)
+
+    builder.eos = {{
+        "wf_parameters": orm.Dict(dict=CONFIG.get("workflow_parameters", {{}})),
+        "scf": eos_scf,
+    }}
+    builder.relax = {{
+        "wf_parameters": orm.Dict(dict=CONFIG.get("workflow_parameters", {{}})),
+        "scf": relax_scf,
+    }}
+    return builder
+
+
+def build_builder():
+    pattern = CONFIG["pattern"]
+    if pattern == "direct":
+        return build_direct_builder()
+    if pattern == "nested_scf":
+        return build_nested_scf_builder()
+    if pattern == "nested_scf_with_final":
+        return build_nested_scf_with_final_builder()
+    if pattern == "banddos_like":
+        return build_banddos_like_builder()
+    if pattern == "create_magnetic":
+        return build_create_magnetic_builder()
+    raise ValueError(f"Unsupported builder pattern: {{pattern}}")
+
+
+def main():
+    load_profile()
+    builder = build_builder()
+    print(f"Launching {{CONFIG['workflow']}} workflow for {{CONFIG['material']}}")
+    pprint(CONFIG)
+
+    if CONFIG["submit_mode"] == "run_get_node":
+        results, node = run_get_node(builder)
+        print(f"Finished with PK: {{node.pk}}")
+        print(f"State: {{node.process_state}}")
+        if CONFIG.get("plot_results"):
+            plot_fleur(node)
+        return results, node
+
+    node = submit(builder)
+    print(f"Submitted PK: {{node.pk}}")
+    print("Monitor with: verdi process show", node.pk)
+    print("Plot later with: aiida-fleur plot", node.pk)
+    return node
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+    def _build_plot_script(self, node_identifiers: list[str]) -> str:
+        pretty_nodes = self._as_pretty_python(node_identifiers)
+        return f'''#!/usr/bin/env python3
+"""
+Plot aiida-fleur results using plot_fleur.
+"""
+
+from aiida import load_profile
+from aiida.orm import load_node
+from aiida_fleur.tools.plot import plot_fleur
+
+
+NODE_IDENTIFIERS = {pretty_nodes}
+
+
+def main():
+    load_profile()
+    nodes = []
+    for identifier in NODE_IDENTIFIERS:
+        try:
+            identifier = int(identifier)
+        except (TypeError, ValueError):
+            pass
+        nodes.append(load_node(identifier))
+
+    if len(nodes) == 1:
+        plot_fleur(nodes[0])
+    else:
+        plot_fleur(nodes)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+    def _server_functions_text(self) -> str:
+        workflow_names = ", ".join(sorted(WORKFLOW_SPECS.keys()))
+        return (
+            "Functions of this server:\n\n"
+            "- Setup of supercomputers and AiiDA codes.\n"
+            "- System-specific setup steps for named machines such as JURECA, JUWELS Cluster, JUWELS Booster, and JUPITER.\n"
+            "- Interactive setup support: if required setup information is missing, the server asks for the missing fields.\n"
+            "- Local AiiDA setup execution: create/configure/test computers and register `inpgen` and `fleur` codes with `verdi`.\n"
+            "- Generation of setup documentation files in the workspace.\n"
+            f"- Generation of workflow input scripts for aiida-fleur workflows: {workflow_names}.\n"
+            "- List of supported workflows with their AiiDA entry points and documentation links.\n"
+            "- Basic magnetic workflow helpers for collinear, noncollinear, and spin-spiral setups.\n"
+            "- Execution of generated aiida-fleur workflow scripts with `verdi run`.\n"
+            "- Listing and monitoring of AiiDA processes.\n"
+            "- Inspection and summary of process outputs, output nodes, and workflow status.\n"
+            "- Generation of plotting scripts for aiida-fleur results using `plot_fleur`.\n"
+            "- Generation of workflow runner scripts in the workspace."
+        )
+
+    @staticmethod
+    def _truncate_lines(text: str, max_lines: int) -> str:
+        lines = text.splitlines()
+        if len(lines) <= max_lines:
+            return text
+        return "\n".join(lines[:max_lines] + [f"... ({len(lines) - max_lines} more lines)"])
+
+    @staticmethod
+    def _extract_process_pk(text: str) -> str | None:
+        for line in text.splitlines():
+            if "PK:" in line or "pk:" in line:
+                for token in line.replace(":", " ").split():
+                    if token.isdigit():
+                        return token
+        return None
+
+    def _run_verdi_script(
+        self,
+        verdi_command: str,
+        script_text: str,
+        args: list[str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory(prefix="aiida-fleur-run-") as tmpdir:
+            script_path = Path(tmpdir) / "verdi_helper.py"
+            script_path.write_text(script_text, encoding="utf-8")
+            command = [verdi_command, "run", str(script_path)]
+            if args:
+                command.extend(args)
+            return self._run_local_command(command)
+
+    def _apply_aiida_setup(
+        self,
+        verdi_command: str,
+        computer_label: str,
+        hostname: str,
+        scheduler: str,
+        transport: str,
+        work_dir: str,
+        mpirun_command: str,
+        default_memory_per_machine_mb: int,
+        prepend_text: str,
+        append_text: str,
+        description: str,
+        ssh_username: str | None,
+        ssh_port: int,
+        ssh_proxy_jump: str | None,
+        safe_interval: int,
+        inpgen_code_label: str,
+        fleur_code_label: str,
+        inpgen_executable_path: str,
+        fleur_executable_path: str,
+        code_description: str,
+        input_plugin_inpgen: str,
+        input_plugin_fleur: str,
+        replace_existing: bool,
+        test_computer: bool,
+        test_codes: bool,
+    ) -> dict[str, Any]:
+        normalized_transport = self._normalize_transport(transport)
+        normalized_scheduler = self._normalize_scheduler(scheduler)
+        inpgen_full_label = f"{inpgen_code_label}@{computer_label}"
+        fleur_full_label = f"{fleur_code_label}@{computer_label}"
+
+        logs: list[dict[str, Any]] = []
+
+        def run_and_record(command: list[str], label: str) -> subprocess.CompletedProcess[str]:
+            result = self._run_local_command(command)
+            logs.append(
+                {
+                    "step": label,
+                    "command": command,
+                    "returncode": result.returncode,
+                    "stdout": result.stdout.strip(),
+                    "stderr": result.stderr.strip(),
+                }
             )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"{label} failed with exit code {result.returncode}\n"
+                    f"stdout:\n{result.stdout}\n"
+                    f"stderr:\n{result.stderr}"
+                )
+            return result
 
-            if result.returncode == 0:
-                pk = None
-                for line in result.stdout.split("\n"):
-                    if "pk:" in line.lower():
-                        import re
-                        match = re.search(r"\d+", line)
-                        if match:
-                            pk = match.group()
-                            break
-
-                response = f"Calculation started successfully!\n{result.stdout}"
-                if pk:
-                    response += f"\n\nProcess ID: {pk}\nMonitor with: verdi process show {pk}"
-
-                return [types.TextContent(type="text", text=response)]
-
-            return [types.TextContent(
-                type="text",
-                text=f"Error starting calculation:\n{result.stderr}"
-            )]
-        except Exception as exc:
-            return [types.TextContent(
-                type="text",
-                text=f"Execution failed: {exc}"
-            )]
-
-    async def check_calculation_status(
-        self,
-        process_id: Optional[str] = None
-    ) -> list[types.TextContent]:
-        """Check status of calculations."""
-        try:
-            if process_id:
-                result = subprocess.run(
-                    ["verdi", "process", "show", process_id],
-                    capture_output=True,
-                    text=True
+        if self._object_exists(verdi_command, "computer", computer_label):
+            if replace_existing:
+                run_and_record(
+                    [verdi_command, "computer", "delete", "--dry-run", computer_label],
+                    "preview delete existing computer",
+                )
+                run_and_record(
+                    [verdi_command, "computer", "delete", "--force", computer_label],
+                    "delete existing computer",
                 )
             else:
-                result = subprocess.run(
-                    ["verdi", "process", "list", "-p", "5", "-a"],
-                    capture_output=True,
-                    text=True
+                raise RuntimeError(
+                    f"Computer `{computer_label}` already exists. "
+                    "Set `replace_existing=true` to recreate it."
                 )
 
-            return [types.TextContent(
-                type="text",
-                text=result.stdout if result.returncode == 0 else result.stderr
-            )]
+        for code_label in [inpgen_full_label, fleur_full_label]:
+            if self._object_exists(verdi_command, "code", code_label):
+                if replace_existing:
+                    run_and_record(
+                        [verdi_command, "code", "delete", "--force", code_label],
+                        f"delete existing code {code_label}",
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Code `{code_label}` already exists. "
+                        "Set `replace_existing=true` to recreate it."
+                    )
+
+        computer_config = self._build_computer_config_yaml(
+            computer_label=computer_label,
+            hostname=hostname,
+            transport=normalized_transport,
+            scheduler=normalized_scheduler,
+            work_dir=work_dir,
+            mpirun_command=mpirun_command,
+            default_memory_per_machine_mb=default_memory_per_machine_mb,
+            prepend_text=prepend_text,
+            append_text=append_text,
+            description=description,
+        )
+        inpgen_config = self._build_code_config_yaml(
+            label=inpgen_full_label,
+            description=code_description,
+            default_calc_job_plugin=input_plugin_inpgen,
+            filepath_executable=inpgen_executable_path,
+            computer_label=computer_label,
+            with_mpi=False,
+        )
+        fleur_config = self._build_code_config_yaml(
+            label=fleur_full_label,
+            description=code_description,
+            default_calc_job_plugin=input_plugin_fleur,
+            filepath_executable=fleur_executable_path,
+            computer_label=computer_label,
+            with_mpi=True,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="aiida-fleur-setup-") as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            computer_config_path = tmpdir_path / "computer.yml"
+            inpgen_config_path = tmpdir_path / "inpgen.yml"
+            fleur_config_path = tmpdir_path / "fleur.yml"
+            computer_config_path.write_text(computer_config, encoding="utf-8")
+            inpgen_config_path.write_text(inpgen_config, encoding="utf-8")
+            fleur_config_path.write_text(fleur_config, encoding="utf-8")
+
+            run_and_record(
+                [
+                    verdi_command,
+                    "computer",
+                    "setup",
+                    "--non-interactive",
+                    "--config",
+                    str(computer_config_path),
+                ],
+                "create computer",
+            )
+
+            configure_command = [
+                verdi_command,
+                "computer",
+                "configure",
+                normalized_transport,
+                "--non-interactive",
+                "--safe-interval",
+                str(safe_interval),
+            ]
+            if normalized_transport == "core.ssh_async":
+                if ssh_username:
+                    configure_command.extend(["--username", ssh_username])
+                if ssh_port:
+                    configure_command.extend(["--port", str(ssh_port)])
+                if ssh_proxy_jump:
+                    configure_command.extend(["--proxy-jump", ssh_proxy_jump])
+            configure_command.append(computer_label)
+            run_and_record(configure_command, "configure computer transport")
+
+            if test_computer:
+                run_and_record(
+                    [verdi_command, "computer", "test", computer_label],
+                    "test computer",
+                )
+
+            run_and_record(
+                [
+                    verdi_command,
+                    "code",
+                    "create",
+                    "core.code.installed",
+                    "--non-interactive",
+                    "--config",
+                    str(inpgen_config_path),
+                ],
+                "create inpgen code",
+            )
+            run_and_record(
+                [
+                    verdi_command,
+                    "code",
+                    "create",
+                    "core.code.installed",
+                    "--non-interactive",
+                    "--config",
+                    str(fleur_config_path),
+                ],
+                "create fleur code",
+            )
+
+            if test_codes:
+                run_and_record(
+                    [verdi_command, "code", "test", inpgen_full_label],
+                    "test inpgen code",
+                )
+                run_and_record(
+                    [verdi_command, "code", "test", fleur_full_label],
+                    "test fleur code",
+                )
+
+        return {
+            "computer_label": computer_label,
+            "hostname": hostname,
+            "transport": normalized_transport,
+            "scheduler": normalized_scheduler,
+            "inpgen_code": inpgen_full_label,
+            "fleur_code": fleur_full_label,
+            "logs": logs,
+        }
+
+    def setup_handlers(self) -> None:
+        async def handle_list_resources(
+            _context: Any,
+            _params: types.PaginatedRequestParams,
+        ) -> types.ListResourcesResult:
+            return types.ListResourcesResult(
+                resources=[
+                    types.Resource(
+                        uri="fleur://docs/workflow_guide",
+                        name="FLEUR Workflow Guide",
+                        description="Overview of supported aiida-fleur workflows and script generator conventions.",
+                        mimeType="text/markdown",
+                    ),
+                    types.Resource(
+                        uri="fleur://docs/setup_guide",
+                        name="FLEUR Setup Guide",
+                        description="How to configure AiiDA supercomputers and register inpgen/fleur codes.",
+                        mimeType="text/markdown",
+                    ),
+                ]
+            )
+
+        async def handle_read_resource(
+            _context: Any,
+            params: types.ReadResourceRequestParams,
+        ) -> types.ReadResourceResult:
+            if params.uri == "fleur://docs/workflow_guide":
+                text = self._load_template("fleur_workflow_server_guide.md")
+            elif params.uri == "fleur://docs/setup_guide":
+                text = self._load_template("fleur_setup_server_guide.md")
+            else:
+                raise ValueError(f"Unknown resource: {params.uri}")
+
+            return types.ReadResourceResult(
+                contents=[
+                    types.TextResourceContents(
+                        uri=params.uri,
+                        mimeType="text/markdown",
+                        text=text,
+                    )
+                ]
+            )
+
+        async def handle_list_tools(
+            _context: Any,
+            _params: types.PaginatedRequestParams,
+        ) -> types.ListToolsResult:
+            return types.ListToolsResult(
+                tools=[
+                    types.Tool(
+                        name="describe_server_functions",
+                        description="Return the functions of this server as a bullet list.",
+                        inputSchema={"type": "object", "properties": {}, "required": []},
+                    ),
+                    types.Tool(
+                        name="list_fleur_workflows",
+                        description="List the supported aiida-fleur workflows and their entry points.",
+                        inputSchema={"type": "object", "properties": {}, "required": []},
+                    ),
+                    types.Tool(
+                        name="generate_fleur_workflow_script",
+                        description="Generate a runnable Python script for a selected aiida-fleur workflow.",
+                        inputSchema=self._workflow_schema(),
+                    ),
+                    types.Tool(
+                        name="generate_fleur_plot_script",
+                        description="Generate a small Python script that plots aiida-fleur results with plot_fleur.",
+                        inputSchema=self._plot_schema(),
+                    ),
+                    types.Tool(
+                        name="execute_fleur_workflow_script",
+                        description="Run a generated aiida-fleur Python script with `verdi run`.",
+                        inputSchema=self._execute_schema(),
+                    ),
+                    types.Tool(
+                        name="list_aiida_processes",
+                        description="List recent AiiDA processes, optionally filtered by process label.",
+                        inputSchema=self._process_list_schema(),
+                    ),
+                    types.Tool(
+                        name="check_aiida_process",
+                        description="Inspect the status and report of an AiiDA process by PK or UUID.",
+                        inputSchema=self._process_status_schema(),
+                    ),
+                    types.Tool(
+                        name="inspect_aiida_outputs",
+                        description="Load an AiiDA process and summarize its outputs and result nodes.",
+                        inputSchema=self._output_inspection_schema(),
+                    ),
+                    types.Tool(
+                        name="generate_aiida_setup_guide",
+                        description="Generate a setup procedure for an AiiDA supercomputer and register inpgen/fleur codes.",
+                        inputSchema=self._setup_schema(),
+                    ),
+                    types.Tool(
+                        name="setup_aiida_computer_and_codes",
+                        description="Ask for missing supercomputer details if needed, then create the AiiDA computer and register the inpgen/fleur codes locally with verdi.",
+                        inputSchema=self._setup_schema(),
+                    ),
+                ]
+            )
+
+        async def handle_call_tool(
+            _context: Any,
+            params: types.CallToolRequestParams,
+        ) -> types.CallToolResult:
+            arguments = params.arguments or {}
+
+            if params.name == "describe_server_functions":
+                content = [types.TextContent(type="text", text=self._server_functions_text())]
+            elif params.name == "list_fleur_workflows":
+                content = await self.list_fleur_workflows()
+            elif params.name == "generate_fleur_workflow_script":
+                content = await self.generate_fleur_workflow_script(**arguments)
+            elif params.name == "generate_fleur_plot_script":
+                content = await self.generate_fleur_plot_script(**arguments)
+            elif params.name == "execute_fleur_workflow_script":
+                content = await self.execute_fleur_workflow_script(**arguments)
+            elif params.name == "list_aiida_processes":
+                content = await self.list_aiida_processes(**arguments)
+            elif params.name == "check_aiida_process":
+                content = await self.check_aiida_process(**arguments)
+            elif params.name == "inspect_aiida_outputs":
+                content = await self.inspect_aiida_outputs(**arguments)
+            elif params.name == "generate_aiida_setup_guide":
+                content = await self.generate_aiida_setup_guide(**arguments)
+            elif params.name == "setup_aiida_computer_and_codes":
+                result = await self.setup_aiida_computer_and_codes(**arguments)
+                return result
+            else:
+                raise ValueError(f"Unknown tool: {params.name}")
+
+            return types.CallToolResult(content=content)
+
+        self.server.add_request_handler("resources/list", types.PaginatedRequestParams, handle_list_resources)
+        self.server.add_request_handler("resources/read", types.ReadResourceRequestParams, handle_read_resource)
+        self.server.add_request_handler("tools/list", types.PaginatedRequestParams, handle_list_tools)
+        self.server.add_request_handler("tools/call", types.CallToolRequestParams, handle_call_tool)
+
+    async def list_fleur_workflows(self) -> list[types.TextContent]:
+        lines = []
+        for name, spec in WORKFLOW_SPECS.items():
+            lines.append(
+                f"- {name}: `{spec['entrypoint']}` - {spec['description']}\n"
+                f"  docs: {WORKFLOW_DOC_LINKS[name]}"
+            )
+        return [types.TextContent(type="text", text="Supported workflows:\n\n" + "\n".join(lines))]
+
+    async def generate_fleur_workflow_script(
+        self,
+        workflow: str,
+        material: str,
+        structure_file: str | None = None,
+        inpgen_code: str = "inpgen@localhost",
+        fleur_code: str = "fleur@localhost",
+        output_dir: str = ".",
+        script_filename: str | None = None,
+        submit_mode: str = "submit",
+        options: dict[str, Any] | None = None,
+        workflow_parameters: dict[str, Any] | None = None,
+        calc_parameters: dict[str, Any] | None = None,
+        scf_workflow_parameters: dict[str, Any] | None = None,
+        final_scf_workflow_parameters: dict[str, Any] | None = None,
+        magnetism: dict[str, Any] | None = None,
+        plot_results: bool = False,
+    ) -> list[types.TextContent]:
+        try:
+            if workflow not in WORKFLOW_SPECS:
+                raise ValueError(f"Unsupported workflow: {workflow}")
+
+            output_path = Path(output_dir).expanduser().resolve()
+            output_path.mkdir(parents=True, exist_ok=True)
+            filename = self._script_name(material, workflow, script_filename)
+            script_path = output_path / filename
+
+            script_content = self._build_workflow_script(
+                workflow=workflow,
+                material=material,
+                structure_file=structure_file,
+                inpgen_code=inpgen_code,
+                fleur_code=fleur_code,
+                submit_mode=submit_mode,
+                options=options or {},
+                workflow_parameters=workflow_parameters or {},
+                calc_parameters=calc_parameters or {},
+                scf_workflow_parameters=scf_workflow_parameters or {},
+                final_scf_workflow_parameters=final_scf_workflow_parameters or {},
+                magnetism=magnetism or {},
+                plot_results=plot_results,
+            )
+
+            script_path.write_text(script_content, encoding="utf-8")
+            script_path.chmod(0o755)
+
+            summary = {
+                "workflow": workflow,
+                "entrypoint": WORKFLOW_SPECS[workflow]["entrypoint"],
+                "material": material,
+                "script_path": str(script_path),
+                "structure_file": structure_file,
+                "submit_mode": submit_mode,
+                "plot_results": plot_results,
+                "docs": WORKFLOW_DOC_LINKS[workflow],
+            }
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2))]
         except Exception as exc:
-            return [types.TextContent(
-                type="text",
-                text=f"Error checking status: {exc}"
-            )]
+            return [types.TextContent(type="text", text=f"Failed to generate workflow script: {exc}")]
 
-    def get_fleur_eos_inputs_template(self) -> str:
-        return self._load_template("fleur_eos_inputs_template.py")
+    async def generate_fleur_plot_script(
+        self,
+        node_identifiers: list[str],
+        output_dir: str = ".",
+        script_filename: str = "plot_fleur_results.py",
+    ) -> list[types.TextContent]:
+        try:
+            output_path = Path(output_dir).expanduser().resolve()
+            output_path.mkdir(parents=True, exist_ok=True)
+            script_path = output_path / script_filename
+            script_path.write_text(self._build_plot_script(node_identifiers), encoding="utf-8")
+            script_path.chmod(0o755)
 
-    def get_fleur_eos_workflow_template(self) -> str:
-        return self._load_template("fleur_eos_workflow_template.py")
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "script_path": str(script_path),
+                            "node_identifiers": node_identifiers,
+                        },
+                        indent=2,
+                    ),
+                )
+            ]
+        except Exception as exc:
+            return [types.TextContent(type="text", text=f"Failed to generate plot script: {exc}")]
 
-    def get_fleur_eos_guide(self) -> str:
-        return self._load_template("fleur_workflow_guide.md")
+    async def execute_fleur_workflow_script(
+        self,
+        script_path: str,
+        verdi_command: str = "verdi",
+    ) -> list[types.TextContent]:
+        try:
+            resolved = Path(script_path).expanduser().resolve()
+            if not resolved.is_file():
+                raise FileNotFoundError(f"Script not found: {resolved}")
 
-    async def run(self):
+            result = self._run_local_command([verdi_command, "run", str(resolved)])
+            pk = self._extract_process_pk(result.stdout)
+            summary = {
+                "script_path": str(resolved),
+                "returncode": result.returncode,
+                "process_pk": pk,
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+            }
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2))]
+        except Exception as exc:
+            return [types.TextContent(type="text", text=f"Failed to execute workflow script: {exc}")]
+
+    async def list_aiida_processes(
+        self,
+        verdi_command: str = "verdi",
+        limit: int = 10,
+        all_entries: bool = True,
+        process_label: str | None = None,
+    ) -> list[types.TextContent]:
+        try:
+            command = [verdi_command, "process", "list", "-p", str(limit)]
+            if all_entries:
+                command.append("-a")
+            result = self._run_local_command(command)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr or result.stdout)
+
+            text = result.stdout.strip()
+            if process_label:
+                lines = text.splitlines()
+                filtered = [lines[0]] if lines else []
+                filtered.extend([line for line in lines[1:] if process_label in line])
+                text = "\n".join(filtered)
+
+            return [types.TextContent(type="text", text=text or "No processes found.")]
+        except Exception as exc:
+            return [types.TextContent(type="text", text=f"Failed to list processes: {exc}")]
+
+    async def check_aiida_process(
+        self,
+        identifier: str,
+        verdi_command: str = "verdi",
+        include_report: bool = True,
+        max_report_lines: int = 40,
+    ) -> list[types.TextContent]:
+        try:
+            show_result = self._run_local_command([verdi_command, "process", "show", identifier])
+            if show_result.returncode != 0:
+                raise RuntimeError(show_result.stderr or show_result.stdout)
+
+            parts = [f"Process status for {identifier}:\n\n{show_result.stdout.strip()}"]
+            if include_report:
+                report_result = self._run_local_command([verdi_command, "process", "report", identifier])
+                report_text = report_result.stdout if report_result.returncode == 0 else report_result.stderr
+                report_text = self._truncate_lines(report_text.strip(), max_report_lines)
+                parts.append(f"Report:\n{report_text or '<empty>'}")
+
+            return [types.TextContent(type="text", text="\n\n".join(parts))]
+        except Exception as exc:
+            return [types.TextContent(type="text", text=f"Failed to check process: {exc}")]
+
+    async def inspect_aiida_outputs(
+        self,
+        identifier: str,
+        verdi_command: str = "verdi",
+        include_extras: bool = False,
+        include_attributes: bool = True,
+    ) -> list[types.TextContent]:
+        try:
+            helper_script = f"""
+import json
+import sys
+from aiida.orm import load_node
+
+identifier = sys.argv[1]
+node = load_node(int(identifier) if str(identifier).isdigit() else identifier)
+summary = {{
+    "pk": node.pk,
+    "uuid": str(node.uuid),
+    "process_label": getattr(node, "process_label", None),
+    "process_state": str(getattr(node, "process_state", None)),
+    "exit_status": getattr(node, "exit_status", None),
+    "exit_message": getattr(node, "exit_message", None),
+    "is_finished_ok": bool(getattr(node, "is_finished_ok", False)),
+    "called_descendants": [child.pk for child in getattr(node, "called_descendants", [])],
+    "outputs": {{}},
+}}
+if {include_attributes!r}:
+    try:
+        summary["attributes"] = node.base.attributes.all
+    except Exception:
+        summary["attributes"] = {{}}
+if {include_extras!r}:
+    try:
+        summary["extras"] = node.base.extras.all
+    except Exception:
+        summary["extras"] = {{}}
+for key, output in node.outputs.items():
+    entry = {{
+        "pk": output.pk,
+        "node_type": output.node_type,
+    }}
+    try:
+        entry["attributes"] = output.base.attributes.all
+    except Exception:
+        pass
+    try:
+        entry["dict"] = output.get_dict()
+    except Exception:
+        pass
+    summary["outputs"][key] = entry
+print(json.dumps(summary, indent=2, default=str))
+"""
+            result = self._run_verdi_script(verdi_command, helper_script, [identifier])
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr or result.stdout)
+            return [types.TextContent(type="text", text=result.stdout.strip())]
+        except Exception as exc:
+            return [types.TextContent(type="text", text=f"Failed to inspect outputs: {exc}")]
+
+    async def generate_aiida_setup_guide(
+        self,
+        system_preset: str | None = None,
+        computer_label: str | None = None,
+        hostname: str | None = None,
+        inpgen_executable_path: str | None = None,
+        fleur_executable_path: str | None = None,
+        scheduler: str = "slurm",
+        transport: str = "ssh",
+        work_dir: str = "/scratch/{username}/aiida_run/",
+        mpirun_command: str = "srun -n {tot_num_mpiprocs}",
+        default_memory_per_machine_mb: int = 0,
+        prepend_text: str = "",
+        append_text: str = "",
+        description: str = "Remote machine for aiida-fleur calculations",
+        use_double_quotes: bool = False,
+        ssh_username: str | None = None,
+        ssh_port: int = 22,
+        ssh_proxy_jump: str | None = None,
+        safe_interval: int = 30,
+        inpgen_code_label: str = "inpgen",
+        fleur_code_label: str = "fleur",
+        code_description: str = "FLEUR executable registered for aiida-fleur",
+        input_plugin_inpgen: str = "fleur.inpgen",
+        input_plugin_fleur: str = "fleur.fleur",
+        output_dir: str = ".",
+        filename: str = "aiida_fleur_setup_guide.md",
+        project_path: str | None = None,
+        fleur_module_hint: str = "fleur",
+    ) -> list[types.TextContent]:
+        try:
+            arguments = self._apply_system_preset({
+                "system_preset": system_preset,
+                "computer_label": computer_label,
+                "hostname": hostname,
+                "inpgen_executable_path": inpgen_executable_path,
+                "fleur_executable_path": fleur_executable_path,
+                "scheduler": scheduler,
+                "transport": transport,
+                "ssh_username": ssh_username,
+            })
+            guide_missing_fields = [
+                field
+                for field in self._missing_setup_fields(dict(arguments))
+                if field not in {"inpgen_executable_path", "fleur_executable_path"}
+            ]
+            if guide_missing_fields:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=(
+                            "Missing setup information. Please provide these fields to generate the guide:\n- "
+                            + "\n- ".join(guide_missing_fields)
+                        ),
+                    )
+                ]
+
+            output_path = Path(output_dir).expanduser().resolve()
+            output_path.mkdir(parents=True, exist_ok=True)
+            guide_path = output_path / filename
+            guide_text = self._build_setup_guide(
+                system_preset=system_preset,
+                computer_label=arguments["computer_label"],
+                hostname=arguments["hostname"],
+                scheduler=arguments.get("scheduler", scheduler),
+                transport=arguments.get("transport", transport),
+                work_dir=work_dir,
+                mpirun_command=mpirun_command,
+                default_memory_per_machine_mb=default_memory_per_machine_mb,
+                prepend_text=prepend_text,
+                append_text=append_text,
+                description=description,
+                use_double_quotes=use_double_quotes,
+                ssh_username=ssh_username,
+                ssh_port=ssh_port,
+                ssh_proxy_jump=ssh_proxy_jump,
+                safe_interval=safe_interval,
+                inpgen_code_label=inpgen_code_label,
+                fleur_code_label=fleur_code_label,
+                inpgen_executable_path=arguments.get("inpgen_executable_path"),
+                fleur_executable_path=arguments.get("fleur_executable_path"),
+                code_description=code_description,
+                input_plugin_inpgen=input_plugin_inpgen,
+                input_plugin_fleur=input_plugin_fleur,
+                project_path=project_path,
+                fleur_module_hint=fleur_module_hint,
+            )
+            guide_path.write_text(guide_text, encoding="utf-8")
+
+            summary = {
+                "guide_path": str(guide_path),
+                "system_preset": system_preset,
+                "computer_label": arguments["computer_label"],
+                "hostname": arguments["hostname"],
+                "scheduler": arguments.get("scheduler", scheduler),
+                "inpgen_code": f"{inpgen_code_label}@{arguments['computer_label']}",
+                "fleur_code": f"{fleur_code_label}@{arguments['computer_label']}",
+            }
+            return [types.TextContent(type="text", text=json.dumps(summary, indent=2))]
+        except Exception as exc:
+            return [types.TextContent(type="text", text=f"Failed to generate setup guide: {exc}")]
+
+    async def setup_aiida_computer_and_codes(
+        self,
+        system_preset: str | None = None,
+        computer_label: str | None = None,
+        hostname: str | None = None,
+        inpgen_executable_path: str | None = None,
+        fleur_executable_path: str | None = None,
+        scheduler: str = "slurm",
+        transport: str = "ssh",
+        work_dir: str = "/scratch/{username}/aiida_run/",
+        mpirun_command: str = "srun -n {tot_num_mpiprocs}",
+        default_memory_per_machine_mb: int = 0,
+        prepend_text: str = "",
+        append_text: str = "",
+        description: str = "Remote machine for aiida-fleur calculations",
+        use_double_quotes: bool = False,
+        ssh_username: str | None = None,
+        ssh_port: int = 22,
+        ssh_proxy_jump: str | None = None,
+        safe_interval: int = 30,
+        inpgen_code_label: str = "inpgen",
+        fleur_code_label: str = "fleur",
+        code_description: str = "FLEUR executable registered for aiida-fleur",
+        input_plugin_inpgen: str = "fleur.inpgen",
+        input_plugin_fleur: str = "fleur.fleur",
+        output_dir: str = ".",
+        filename: str = "aiida_fleur_setup_guide.md",
+        project_path: str | None = None,
+        fleur_module_hint: str = "fleur",
+        verdi_command: str = "verdi",
+        apply: bool = False,
+        replace_existing: bool = False,
+        test_computer: bool = True,
+        test_codes: bool = True,
+    ) -> types.CallToolResult:
+        arguments = self._apply_system_preset({
+            "system_preset": system_preset,
+            "computer_label": computer_label,
+            "hostname": hostname,
+            "inpgen_executable_path": inpgen_executable_path,
+            "fleur_executable_path": fleur_executable_path,
+            "scheduler": scheduler,
+            "transport": transport,
+            "ssh_username": ssh_username,
+        })
+        missing_fields = self._missing_setup_fields(arguments)
+        if missing_fields:
+            return types.CallToolResult(
+                resultType="input_required",
+                content=[
+                    types.TextContent(
+                        type="text",
+                        text=(
+                            "I need a few setup details before I can configure the AiiDA computer and the codes.\n"
+                            "Please provide:\n- " + "\n- ".join(missing_fields)
+                        ),
+                    )
+                ],
+                structuredContent={
+                    "missing_fields": missing_fields,
+                    "next_step": "Call setup_aiida_computer_and_codes again with those fields filled in.",
+                },
+            )
+
+        if not apply:
+            guide_content = await self.generate_aiida_setup_guide(
+                system_preset=system_preset,
+                computer_label=arguments["computer_label"],
+                hostname=arguments["hostname"],
+                inpgen_executable_path=inpgen_executable_path,
+                fleur_executable_path=fleur_executable_path,
+                scheduler=arguments.get("scheduler", scheduler),
+                transport=arguments.get("transport", transport),
+                work_dir=work_dir,
+                mpirun_command=mpirun_command,
+                default_memory_per_machine_mb=default_memory_per_machine_mb,
+                prepend_text=prepend_text,
+                append_text=append_text,
+                description=description,
+                use_double_quotes=use_double_quotes,
+                ssh_username=ssh_username,
+                ssh_port=ssh_port,
+                ssh_proxy_jump=ssh_proxy_jump,
+                safe_interval=safe_interval,
+                inpgen_code_label=inpgen_code_label,
+                fleur_code_label=fleur_code_label,
+                code_description=code_description,
+                input_plugin_inpgen=input_plugin_inpgen,
+                input_plugin_fleur=input_plugin_fleur,
+                output_dir=output_dir,
+                filename=filename,
+                project_path=project_path,
+                fleur_module_hint=fleur_module_hint,
+            )
+            preview_text = guide_content[0].text if guide_content else ""
+            return types.CallToolResult(
+                content=[
+                    types.TextContent(
+                        type="text",
+                        text=(
+                            "Setup preview generated. Review the guide, then call this tool again with `apply=true` "
+                            "to actually run the local `verdi` setup commands.\n\n"
+                            f"{preview_text}"
+                        ),
+                    )
+                ],
+                structuredContent={
+                    "apply": False,
+                    "system_preset": system_preset,
+                    "computer_label": arguments["computer_label"],
+                    "hostname": arguments["hostname"],
+                    "verdi_command": verdi_command,
+                },
+            )
+
+        try:
+            summary = self._apply_aiida_setup(
+                verdi_command=verdi_command,
+                computer_label=arguments["computer_label"],
+                hostname=arguments["hostname"],
+                scheduler=arguments.get("scheduler", scheduler),
+                transport=arguments.get("transport", transport),
+                work_dir=work_dir,
+                mpirun_command=mpirun_command,
+                default_memory_per_machine_mb=default_memory_per_machine_mb,
+                prepend_text=prepend_text,
+                append_text=append_text,
+                description=description,
+                ssh_username=ssh_username,
+                ssh_port=ssh_port,
+                ssh_proxy_jump=ssh_proxy_jump,
+                safe_interval=safe_interval,
+                inpgen_code_label=inpgen_code_label,
+                fleur_code_label=fleur_code_label,
+                inpgen_executable_path=arguments["inpgen_executable_path"],
+                fleur_executable_path=arguments["fleur_executable_path"],
+                code_description=code_description,
+                input_plugin_inpgen=input_plugin_inpgen,
+                input_plugin_fleur=input_plugin_fleur,
+                replace_existing=replace_existing,
+                test_computer=test_computer,
+                test_codes=test_codes,
+            )
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=json.dumps(summary, indent=2))],
+                structuredContent=summary,
+            )
+        except Exception as exc:
+            return types.CallToolResult(
+                isError=True,
+                content=[types.TextContent(type="text", text=f"Failed to apply setup: {exc}")],
+            )
+
+    async def run(self) -> None:
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
             await self.server.run(
                 read_stream,
                 write_stream,
                 InitializationOptions(
-                    server_name="aiida-fleur-eos",
-                    server_version="0.1.0",
+                    server_name="fleur-workflows",
+                    server_version="1.0.0",
                     capabilities=self.server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},
@@ -406,5 +2154,5 @@ class AiidaMCPServer:
 if __name__ == "__main__":
     import asyncio
 
-    server = AiidaMCPServer()
+    server = FleurWorkflowMCPServer()
     asyncio.run(server.run())

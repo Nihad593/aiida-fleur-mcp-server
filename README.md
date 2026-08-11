@@ -1,111 +1,155 @@
-# AiiDA-FLEUR EOS MCP Server
+# FLEUR Workflow MCP Server
 
-This repository is an MCP server focused only on `aiida-fleur` equation-of-state workflows.
+This repository is an MCP server for generating runnable `aiida-fleur` Python
+scripts for the main FLEUR workflows.
 
-It helps an MCP client such as Claude generate:
+## Supported Workflows
 
-- reusable AiiDA builder inputs for `WorkflowFactory("fleur.eos")`
-- optional runnable Python scripts that submit the EOS workflow
-- basic monitoring commands for the submitted AiiDA process
+- `scf`
+- `eos`
+- `relax`
+- `band`
+- `dos`
+- `mae`
+- `ssdisp`
+- `dmi`
+- `corehole`
+- `init_cls`
+- `create_magnetic`
 
-## Prerequisites
+The generated scripts are meant to be practical starting points for:
 
-- Python 3.10+
-- AiiDA with a configured profile
-- `aiida-fleur` installed
-- configured AiiDA codes for `inpgen` and `fleur`
+- self-consistent calculations
+- DOS and band structure calculations
+- structure relaxations and EOS scans
+- magnetic anisotropy and spin-spiral studies
+- DMI workflows
+- magnetic film setup
+- quick plotting with `plot_fleur`
+- AiiDA supercomputer and code setup guides
 
 ## Main MCP Tools
 
-### `generate_fleur_eos_inputs`
+### `list_fleur_workflows`
 
-Returns a reusable AiiDA builder block for `fleur.eos`.
+Lists the supported workflows, their `WorkflowFactory(...)` entry points, and
+the corresponding official documentation pages.
 
-Required inputs:
+### `generate_fleur_workflow_script`
 
+Creates a runnable Python script for a selected `aiida-fleur` workflow.
+
+Useful inputs include:
+
+- `workflow`
 - `material`
 - `structure_file`
-
-Optional inputs:
-
 - `inpgen_code`
 - `fleur_code`
-- `points`
-- `step`
-- `guess`
-- `fleur_runmax`
-- `itmax_per_run`
-- `density_converged`
-- `num_machines`
-- `num_mpiprocs_per_machine`
-- `max_wallclock_seconds`
-- `queue_name`
+- `workflow_parameters`
+- `calc_parameters`
+- `scf_workflow_parameters`
+- `magnetism`
+- `plot_results`
 
-### `generate_fleur_eos_script`
+### `generate_fleur_plot_script`
 
-Creates a runnable Python script for the same EOS workflow.
+Creates a small plotting script that calls `plot_fleur` on one or more node
+PKs or UUIDs.
 
-### `execute_calculation`
+### `execute_fleur_workflow_script`
 
-Runs a generated script with:
+Runs a generated workflow script with:
 
 ```bash
 verdi run <script_path>
 ```
 
-### `check_calculation_status`
+### `list_aiida_processes`
 
-Shows the status of recent processes or one selected process.
+Lists recent AiiDA processes.
 
-## Important Files
+### `check_aiida_process`
 
-```text
-aiida-mcp/
-├── server.py
-├── templates/
-│   ├── fleur_eos_inputs_template.py
-│   ├── fleur_eos_script_template.py
-│   ├── fleur_eos_workflow_template.py
-│   └── fleur_workflow_guide.md
-└── prompts/
-    └── aiida_fleur_eos.md
-```
+Shows the status and report of a selected AiiDA process.
 
-## Running The Server
+### `inspect_aiida_outputs`
+
+Loads a selected AiiDA process and summarizes its outputs, output nodes, and
+basic workflow result information.
+
+### `generate_aiida_setup_guide`
+
+Creates a Markdown setup procedure for:
+
+- `verdi computer setup`
+- `verdi computer configure`
+- `verdi computer test`
+- `verdi code create` for `inpgen`
+- `verdi code create` for `fleur`
+
+Useful inputs include:
+
+- `system_preset` such as `jureca`, `juwels-cluster`, `juwels-booster`, or `jupiter`
+- `computer_label`
+- `hostname`
+- `scheduler`
+- `work_dir`
+- `mpirun_command`
+- `prepend_text`
+- `inpgen_executable_path`
+- `fleur_executable_path`
+
+If required setup fields are missing, the server now reports which ones are
+still needed.
+
+### `setup_aiida_computer_and_codes`
+
+Creates the AiiDA computer and registers the `inpgen` and `fleur` codes with
+the local `verdi` command.
+
+Behavior:
+
+- if required fields are missing, the tool asks for them
+- if `apply=false`, it returns a preview and setup guide
+- if `apply=true`, it runs the setup locally
+
+Important inputs:
+
+- `system_preset`
+- `computer_label`
+- `hostname`
+- `ssh_username` for SSH-based machines
+- `inpgen_executable_path`
+- `fleur_executable_path`
+- `verdi_command`
+- `apply`
+- `replace_existing`
+
+## Requirements
+
+- Python 3.10+
+- `mcp`
+- `aiida-core`
+- `aiida-fleur`
+- `ase`
+- configured AiiDA profile
+- configured `inpgen` and `fleur` code nodes
+
+## Run
 
 ```bash
 python3 -m pip install mcp
 python3 /absolute/path/to/server.py
 ```
 
-Or register it with Claude Code:
+## Notes
 
-```bash
-claude mcp add --scope user python3 /absolute/path/to/server.py
-```
-
-## How It Connects To AiiDA
-
-The generated code builds:
-
-```python
-WorkflowFactory("fleur.eos").get_builder()
-```
-
-and fills:
-
-```python
-builder.structure
-builder.wf_parameters
-builder.scf.wf_parameters
-builder.scf.options
-builder.scf.inpgen
-builder.scf.fleur
-```
-
-You can then use the returned builder with:
-
-```python
-from aiida.engine import submit
-process = submit(builder)
-```
+- The server now focuses on generating workflow scripts, not raw `inp.xml`
+  files.
+- It can also generate an AiiDA setup guide for a remote supercomputer and the
+  `inpgen`/`fleur` codes you want to register there.
+- Magnetic setup is provided as a helper for common `inpxml_changes`, but many
+  real magnetic calculations still require workflow-specific tuning.
+- For advanced input details, use the official `aiida-fleur` workflow docs
+  linked by `list_fleur_workflows`.
