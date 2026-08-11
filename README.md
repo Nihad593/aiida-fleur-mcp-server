@@ -1,9 +1,36 @@
 # FLEUR Workflow MCP Server
 
-This repository is an MCP server for generating runnable `aiida-fleur` Python
-scripts for the main FLEUR workflows.
+This repository provides an MCP server for `aiida-fleur` setup, workflow
+generation, execution, monitoring, and output inspection.
+
+It is designed to help with three main areas:
+
+- setup of supercomputers, AiiDA computers, and `inpgen`/`fleur` codes
+- generation of runnable `aiida-fleur` workflow scripts
+- execution, monitoring, and inspection of AiiDA/FLEUR calculations
+
+## Functions
+
+When a user asks what the server does, the server can describe its functions in
+this order:
+
+- setup of supercomputers and AiiDA codes
+- system-specific setup presets such as `jureca`, `juwels-cluster`,
+  `juwels-booster`, and `jupiter`
+- interactive setup support for missing required information
+- local AiiDA setup execution with `verdi`
+- setup documentation generation
+- workflow input/script generation
+- supported workflow listing
+- magnetic workflow helpers
+- workflow execution with `verdi run`
+- AiiDA process listing and monitoring
+- output and result inspection
+- plotting support
 
 ## Supported Workflows
+
+The server can generate scripts for these `aiida-fleur` workflows:
 
 - `scf`
 - `eos`
@@ -17,27 +44,21 @@ scripts for the main FLEUR workflows.
 - `init_cls`
 - `create_magnetic`
 
-The generated scripts are meant to be practical starting points for:
-
-- self-consistent calculations
-- DOS and band structure calculations
-- structure relaxations and EOS scans
-- magnetic anisotropy and spin-spiral studies
-- DMI workflows
-- magnetic film setup
-- quick plotting with `plot_fleur`
-- AiiDA supercomputer and code setup guides
-
 ## Main MCP Tools
 
-### `list_fleur_workflows`
+### Discovery
 
-Lists the supported workflows, their `WorkflowFactory(...)` entry points, and
-the corresponding official documentation pages.
+- `describe_server_functions`
+  Returns the server functions as a clean bullet list.
 
-### `generate_fleur_workflow_script`
+- `list_fleur_workflows`
+  Lists supported workflows, their `WorkflowFactory(...)` entry points, and the
+  official documentation links.
 
-Creates a runnable Python script for a selected `aiida-fleur` workflow.
+### Workflow Generation
+
+- `generate_fleur_workflow_script`
+  Generates a runnable Python script for a selected `aiida-fleur` workflow.
 
 Useful inputs include:
 
@@ -49,64 +70,44 @@ Useful inputs include:
 - `workflow_parameters`
 - `calc_parameters`
 - `scf_workflow_parameters`
+- `final_scf_workflow_parameters`
 - `magnetism`
 - `plot_results`
 
-### `generate_fleur_plot_script`
+### Plotting
 
-Creates a small plotting script that calls `plot_fleur` on one or more node
-PKs or UUIDs.
+- `generate_fleur_plot_script`
+  Generates a plotting script that uses `plot_fleur` on one or more node PKs or
+  UUIDs.
 
-### `execute_fleur_workflow_script`
+### Run And Monitor
 
-Runs a generated workflow script with:
+- `execute_fleur_workflow_script`
+  Runs a generated workflow script with:
 
 ```bash
 verdi run <script_path>
 ```
 
-### `list_aiida_processes`
+- `list_aiida_processes`
+  Lists recent AiiDA processes.
 
-Lists recent AiiDA processes.
+- `check_aiida_process`
+  Shows the current status and the report of an AiiDA process by PK or UUID.
 
-### `check_aiida_process`
+- `inspect_aiida_outputs`
+  Loads an AiiDA process and summarizes its outputs, output nodes, and basic
+  workflow result information.
 
-Shows the status and report of a selected AiiDA process.
+### Supercomputer And Code Setup
 
-### `inspect_aiida_outputs`
+- `generate_aiida_setup_guide`
+  Writes a Markdown setup procedure for a remote machine and for registering
+  `inpgen` and `fleur`.
 
-Loads a selected AiiDA process and summarizes its outputs, output nodes, and
-basic workflow result information.
-
-### `generate_aiida_setup_guide`
-
-Creates a Markdown setup procedure for:
-
-- `verdi computer setup`
-- `verdi computer configure`
-- `verdi computer test`
-- `verdi code create` for `inpgen`
-- `verdi code create` for `fleur`
-
-Useful inputs include:
-
-- `system_preset` such as `jureca`, `juwels-cluster`, `juwels-booster`, or `jupiter`
-- `computer_label`
-- `hostname`
-- `scheduler`
-- `work_dir`
-- `mpirun_command`
-- `prepend_text`
-- `inpgen_executable_path`
-- `fleur_executable_path`
-
-If required setup fields are missing, the server now reports which ones are
-still needed.
-
-### `setup_aiida_computer_and_codes`
-
-Creates the AiiDA computer and registers the `inpgen` and `fleur` codes with
-the local `verdi` command.
+- `setup_aiida_computer_and_codes`
+  Uses local `verdi` commands to create/configure/test the AiiDA computer and
+  register the `inpgen` and `fleur` codes.
 
 Behavior:
 
@@ -114,17 +115,23 @@ Behavior:
 - if `apply=false`, it returns a preview and setup guide
 - if `apply=true`, it runs the setup locally
 
-Important inputs:
+## Supercomputer Presets
 
-- `system_preset`
-- `computer_label`
-- `hostname`
-- `ssh_username` for SSH-based machines
-- `inpgen_executable_path`
-- `fleur_executable_path`
-- `verdi_command`
-- `apply`
-- `replace_existing`
+The server currently includes named presets for:
+
+- `jureca`
+- `juwels-cluster`
+- `juwels-booster`
+- `jupiter`
+
+These presets provide machine-specific defaults for:
+
+- login hostname
+- scheduler
+- transport
+- setup notes
+- module discovery hints
+- links to official system documentation
 
 ## Requirements
 
@@ -133,23 +140,40 @@ Important inputs:
 - `aiida-core`
 - `aiida-fleur`
 - `ase`
-- configured AiiDA profile
-- configured `inpgen` and `fleur` code nodes
+- a configured AiiDA profile
+- configured `inpgen` and `fleur` code nodes for workflow execution
 
-## Run
+## Running The Server
+
+Because many macOS/Homebrew Python installations are externally managed, a
+virtual environment is the recommended way to run the server.
 
 ```bash
+cd /absolute/path/to/aiida-fleur-mcp
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
 python3 -m pip install mcp
-python3 /absolute/path/to/server.py
+python3 server.py
+```
+
+To start it again later:
+
+```bash
+cd /absolute/path/to/aiida-fleur-mcp
+source .venv/bin/activate
+python3 server.py
 ```
 
 ## Notes
 
-- The server now focuses on generating workflow scripts, not raw `inp.xml`
-  files.
-- It can also generate an AiiDA setup guide for a remote supercomputer and the
-  `inpgen`/`fleur` codes you want to register there.
-- Magnetic setup is provided as a helper for common `inpxml_changes`, but many
-  real magnetic calculations still require workflow-specific tuning.
-- For advanced input details, use the official `aiida-fleur` workflow docs
-  linked by `list_fleur_workflows`.
+- The server focuses on `aiida-fleur` workflow automation, not raw manual
+  `inp.xml` authoring.
+- Execution and monitoring features rely on your local AiiDA environment and
+  `verdi` being available.
+- Setup application with `setup_aiida_computer_and_codes` changes your local
+  AiiDA configuration, so review the preview before running with `apply=true`.
+- The magnetic helper is meant as a practical starting point. Advanced magnetic
+  studies still need workflow-specific tuning.
+- For workflow-specific scientific input details, use the official
+  `aiida-fleur` documentation linked by `list_fleur_workflows`.

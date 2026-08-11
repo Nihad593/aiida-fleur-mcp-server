@@ -7,3 +7,5 @@ __pycache__
 venv/
 .env
 aiida_fleur_setup_guide*.md
+id_ed25519
+id_ed25519.pub
