@@ -32,6 +32,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("fleur-workflow-mcp")
 
+SERVER_TITLE = "FLEUR Workflow MCP Server"
+SERVER_AUTHOR = "Nihad Abuawwad"
+SERVER_VERSION = "1.1.0"
+
 
 WORKFLOW_SPECS: dict[str, dict[str, Any]] = {
     "scf": {
@@ -122,6 +126,174 @@ WORKFLOW_DOC_LINKS = {
     "create_magnetic": "https://aiida-fleur.readthedocs.io/en/latest/user_guide/workflows/create_magnetic_wc.html",
 }
 
+WORKFLOW_TEACHING = {
+    "scf": {
+        "what": "Runs a self-consistent FLEUR cycle until the charge density is converged.",
+        "when": "Use this as the basic electronic-structure workflow for a material before DOS, bands, MAE, DMI, or other post-processing workflows.",
+        "how": "The workflow takes a structure or FleurinpData, runs `inpgen` if needed, starts FLEUR, checks convergence, and can continue over multiple FLEUR runs until the density criteria are reached.",
+        "main_inputs": [
+            "structure_file or structure node",
+            "inpgen code",
+            "fleur code",
+            "SCF workflow parameters like `itmax_per_run`, `fleur_runmax`, and convergence thresholds",
+            "scheduler options and resources",
+        ],
+        "main_outputs": [
+            "converged SCF process",
+            "final output parameters",
+            "remote folder / retrieved data",
+            "a converged starting point for later workflows",
+        ],
+    },
+    "eos": {
+        "what": "Runs an equation-of-state workflow by calculating several scaled volumes around the initial structure.",
+        "when": "Use this when you want equilibrium lattice constants, bulk modulus trends, or a better starting volume before detailed production calculations.",
+        "how": "The workflow rescales the structure over a range of volumes and launches a nested SCF workflow at each point. The collected energies are then used to analyze the volume-energy curve.",
+        "main_inputs": [
+            "initial structure",
+            "EOS workflow parameters like `points`, `step`, and `guess`",
+            "nested SCF settings",
+            "inpgen and fleur codes",
+        ],
+        "main_outputs": [
+            "energies for each tested volume",
+            "volume-energy data for fitting",
+            "an equilibrium-volume estimate",
+        ],
+    },
+    "relax": {
+        "what": "Relaxes the atomic structure iteratively using FLEUR forces.",
+        "when": "Use this when the atomic positions are not yet optimized or when you want a lower-force geometry before SCF, DOS, or magnetic analysis.",
+        "how": "The workflow performs repeated SCF and force evaluations, updates the structure, and optionally finishes with a final SCF run on the relaxed geometry.",
+        "main_inputs": [
+            "initial structure",
+            "relax workflow parameters",
+            "nested SCF settings",
+            "optional final SCF settings",
+        ],
+        "main_outputs": [
+            "relaxed structure",
+            "force history",
+            "final relaxed workflow result",
+        ],
+    },
+    "band": {
+        "what": "Calculates band structure information using the FLEUR BandDos workflow in `band` mode.",
+        "when": "Use this after a well-converged SCF calculation when you want the dispersion of eigenvalues along a k-path.",
+        "how": "The workflow starts from SCF or from an existing FLEUR input, applies band-structure settings such as k-path choices, and runs the band calculation mode in FLEUR.",
+        "main_inputs": [
+            "converged SCF starting point or structure plus SCF namespace",
+            "band workflow parameters such as `kpath`, `klistname`, `emin`, `emax`, and `sigma`",
+            "fleur code",
+        ],
+        "main_outputs": [
+            "band data",
+            "band-related output files",
+            "data suitable for plotting with `plot_fleur`",
+        ],
+    },
+    "dos": {
+        "what": "Calculates density of states using the FLEUR BandDos workflow in `dos` mode.",
+        "when": "Use this after a converged SCF calculation when you want total or projected density-of-states information.",
+        "how": "The workflow reuses a converged electronic structure, switches the FLEUR run into DOS mode, and collects energy-resolved DOS information.",
+        "main_inputs": [
+            "converged SCF starting point or structure plus SCF namespace",
+            "DOS workflow parameters such as `emin`, `emax`, and `sigma`",
+            "fleur code",
+        ],
+        "main_outputs": [
+            "DOS data",
+            "spin-resolved or projected DOS information when requested",
+            "data suitable for plotting with `plot_fleur`",
+        ],
+    },
+    "mae": {
+        "what": "Calculates magnetic anisotropy energy by comparing magnetization directions.",
+        "when": "Use this for spin-orbit driven anisotropy studies after you already have a converged magnetic starting point.",
+        "how": "The workflow uses a converged magnetic reference, applies spin-orbit and magnetization-direction settings, and evaluates total-energy differences between orientations.",
+        "main_inputs": [
+            "converged magnetic starting point",
+            "MAE workflow parameters",
+            "noncollinear / SOC-related `inpxml_changes` when needed",
+        ],
+        "main_outputs": [
+            "anisotropy energies",
+            "direction-dependent energy comparison",
+        ],
+    },
+    "ssdisp": {
+        "what": "Calculates spin-spiral dispersion.",
+        "when": "Use this when studying noncollinear magnetism or spin-spiral energetics as a function of q-vector.",
+        "how": "The workflow prepares noncollinear spin-spiral settings, evaluates several q-points, and returns the energy trend versus spin-spiral vector.",
+        "main_inputs": [
+            "magnetic starting point",
+            "spin-spiral parameters like q-vectors",
+            "noncollinear FLEUR settings",
+        ],
+        "main_outputs": [
+            "spin-spiral energy dispersion",
+            "q-dependent magnetic results",
+        ],
+    },
+    "dmi": {
+        "what": "Calculates Dzyaloshinskii-Moriya interaction related energy contributions.",
+        "when": "Use this for chiral magnetic systems when you want to quantify DMI from a converged magnetic reference state.",
+        "how": "The workflow combines spin-spiral style settings with spin-orbit coupling and evaluates the relevant energy differences for DMI analysis.",
+        "main_inputs": [
+            "converged magnetic starting point",
+            "DMI workflow parameters",
+            "SOC and noncollinear settings",
+        ],
+        "main_outputs": [
+            "DMI-related energies",
+            "data for chiral magnetic analysis",
+        ],
+    },
+    "corehole": {
+        "what": "Runs a core-hole workflow for core-level binding-energy style studies.",
+        "when": "Use this when you want to simulate the effect of a core hole on a selected atom or species.",
+        "how": "The workflow modifies the electronic setup to represent a core hole, runs the required FLEUR calculation steps, and compares the resulting energies or shifts.",
+        "main_inputs": [
+            "structure",
+            "core-hole workflow settings",
+            "selected atom/species information",
+            "inpgen and fleur codes",
+        ],
+        "main_outputs": [
+            "core-hole calculation results",
+            "core-level energy/shift related information",
+        ],
+    },
+    "init_cls": {
+        "what": "Calculates initial core-level shifts.",
+        "when": "Use this when you want a workflow-oriented estimate of initial-state core-level shifts between atoms, sites, or reference systems.",
+        "how": "The workflow evaluates the initial-state electronic structure and extracts the relevant core-level information without creating the full final-state core-hole situation.",
+        "main_inputs": [
+            "structure",
+            "initial core-level shift workflow settings",
+            "inpgen and fleur codes",
+        ],
+        "main_outputs": [
+            "initial core-level shift information",
+            "site or species comparisons",
+        ],
+    },
+    "create_magnetic": {
+        "what": "Builds a magnetic film/substrate setup for later magnetic studies.",
+        "when": "Use this when constructing a magnetic heterostructure or film model before MAE, DMI, or spin-spiral workflows.",
+        "how": "The workflow prepares a magnetic structure model and nests other workflows such as EOS and relax to create a usable magnetic starting system.",
+        "main_inputs": [
+            "film/substrate construction settings",
+            "EOS and relax namespaces",
+            "magnetic workflow parameters",
+        ],
+        "main_outputs": [
+            "prepared magnetic film model",
+            "relaxed and/or pre-optimized structure for later magnetic workflows",
+        ],
+    },
+}
+
 
 DEFAULT_OPTIONS = {
     "resources": {"num_machines": 1, "num_mpiprocs_per_machine": 1},
@@ -131,6 +303,7 @@ DEFAULT_OPTIONS = {
 
 TRANSPORT_MAP = {
     "ssh": "core.ssh_async",
+    "core.ssh": "core.ssh",
     "local": "core.local",
     "core.ssh_async": "core.ssh_async",
     "core.local": "core.local",
@@ -156,7 +329,35 @@ SYSTEM_PRESETS = {
         "label_suffix": "jureca",
         "hostname": "jureca.fz-juelich.de",
         "scheduler": "core.slurm",
-        "transport": "core.ssh_async",
+        "transport": "core.ssh",
+        "computer_example": {
+            "label": "jureca",
+            "description": "HDF5",
+            "work_dir": "/p/project1/<project>/<user>/aiida",
+            "mpirun_command": "srun",
+            "default_procs_per_machine": 128,
+            "prepend_text": "#SBATCH --account=<project>",
+        },
+        "code_examples": [
+            {
+                "title": "CPU `inpgen` example",
+                "label": "inpgencpu",
+                "plugin": "fleur.inpgen",
+                "description": "HDF5",
+                "with_mpi": False,
+                "prepend_text": "module load Stages/2026 imkl/2025.2.0 Intel/2025.2.0 ParaStationMPI/5.13.0-1 CMake/3.31.8 HDF5/1.14.6",
+                "filepath_executable": "/p/project1/<project>/<user>/fleur-cpu/build/inpgen",
+            },
+            {
+                "title": "CPU `fleur` example",
+                "label": "cpufleur",
+                "plugin": "fleur.fleur",
+                "description": "HDF5",
+                "with_mpi": True,
+                "prepend_text": "module load Stages/2026 imkl/2025.2.0 Intel/2025.2.0 ParaStationMPI/5.13.0-1 CMake/3.31.8 HDF5/1.14.6",
+                "filepath_executable": "/p/project1/<project>/<user>/fleur-cpu/build/fleur_MPI",
+            },
+        ],
         "docs": {
             "access": "https://apps.fz-juelich.de/jsc/hps/jureca/access.html",
             "modules": "https://apps.fz-juelich.de/jsc/hps/jureca/software-modules.html",
@@ -171,7 +372,7 @@ SYSTEM_PRESETS = {
         "label_suffix": "juwels-cluster",
         "hostname": "juwels-cluster.fz-juelich.de",
         "scheduler": "core.slurm",
-        "transport": "core.ssh_async",
+        "transport": "core.ssh",
         "docs": {
             "access": "https://apps.fz-juelich.de/jsc/hps/juwels/access.html",
             "modules": "https://apps.fz-juelich.de/jsc/hps/juwels/software-modules.html",
@@ -186,7 +387,7 @@ SYSTEM_PRESETS = {
         "label_suffix": "juwels-booster",
         "hostname": "juwels-booster.fz-juelich.de",
         "scheduler": "core.slurm",
-        "transport": "core.ssh_async",
+        "transport": "core.ssh",
         "docs": {
             "access": "https://apps.fz-juelich.de/jsc/hps/juwels/access.html",
             "modules": "https://apps.fz-juelich.de/jsc/hps/juwels/software-modules.html",
@@ -201,7 +402,54 @@ SYSTEM_PRESETS = {
         "label_suffix": "jupiter",
         "hostname": "login.jupiter.fz-juelich.de",
         "scheduler": "core.slurm",
-        "transport": "core.ssh_async",
+        "transport": "core.ssh",
+        "computer_example": {
+            "label": "jupiter",
+            "description": "HDF5",
+            "work_dir": "/e/project1/<project>/<user>/aiida",
+            "mpirun_command": "srun",
+            "default_procs_per_machine": 72,
+            "default_memory_kb_per_machine": 30,
+            "prepend_text": "",
+        },
+        "code_examples": [
+            {
+                "title": "GPU `inpgen` example with Spack",
+                "label": "inpgengpu",
+                "plugin": "fleur.inpgen",
+                "description": "HDF5",
+                "with_mpi": False,
+                "prepend_text": "\n".join(
+                    [
+                        "module load Stages/2026 nvidia-compilers/25.9-CUDA-13 ParaStationMPI/5.13.0-1 HDF5 git",
+                        "export SLURM_CPUS_PER_TASK=36",
+                        'export CUDA_VISIBLE_DEVICES=\"0,1,2,3\"',
+                        "source /e/project1/<project>/<user>/spack/share/spack/setup-env.sh",
+                        "spack env activate gpufleur2026",
+                        "spack load fleur",
+                    ]
+                ),
+                "filepath_executable": "/e/project1/<project>/<user>/spack/opt/spack/<arch>/fleur-<hash>/bin/inpgen",
+            },
+            {
+                "title": "GPU `fleur` example with Spack",
+                "label": "fleurgpu",
+                "plugin": "fleur.fleur",
+                "description": "HDF5+MPI",
+                "with_mpi": True,
+                "prepend_text": "\n".join(
+                    [
+                        "module load Stages/2026 nvidia-compilers/25.9-CUDA-13 ParaStationMPI/5.13.0-1 HDF5 git",
+                        "export SLURM_CPUS_PER_TASK=36",
+                        'export CUDA_VISIBLE_DEVICES=\"0,1,2,3\"',
+                        "source /e/project1/<project>/<user>/spack/share/spack/setup-env.sh",
+                        "spack env activate gpufleur2026",
+                        "spack load fleur",
+                    ]
+                ),
+                "filepath_executable": "/e/project1/<project>/<user>/spack/opt/spack/<arch>/fleur-<hash>/bin/fleur_MPI",
+            },
+        ],
         "docs": {
             "access": "https://apps.fz-juelich.de/jsc/hps/jupiter/access.html",
             "modules": "https://apps.fz-juelich.de/jsc/hps/jupiter/compile.html",
@@ -308,6 +556,19 @@ class FleurWorkflowMCPServer:
                 },
             },
             "required": ["workflow", "material"],
+        }
+
+    def _workflow_explanation_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "workflow": {
+                    "type": "string",
+                    "enum": sorted(WORKFLOW_SPECS.keys()),
+                    "description": "Workflow to explain.",
+                },
+            },
+            "required": ["workflow"],
         }
 
     def _plot_schema(self) -> dict[str, Any]:
@@ -445,7 +706,7 @@ class FleurWorkflowMCPServer:
                 },
                 "transport": {
                     "type": "string",
-                    "enum": ["ssh", "local", "core.ssh_async", "core.local"],
+                    "enum": ["ssh", "local", "core.ssh", "core.ssh_async", "core.local"],
                     "default": "ssh",
                     "description": "AiiDA transport type.",
                 },
@@ -763,7 +1024,7 @@ class FleurWorkflowMCPServer:
         normalized_scheduler = self._normalize_scheduler(scheduler)
         preset = SYSTEM_PRESETS.get(system_preset) if system_preset else None
         quote_option = "--use-double-quotes" if use_double_quotes else ""
-        memory_line = (
+        command_memory_line = (
             f"  --default-memory-per-machine {default_memory_per_machine_mb} \\\n"
             if default_memory_per_machine_mb > 0
             else ""
@@ -790,6 +1051,56 @@ class FleurWorkflowMCPServer:
             docs_lines = []
             for key, value in preset["docs"].items():
                 docs_lines.append(f"- {key}: {value}")
+            computer_example_section = ""
+            if preset.get("computer_example"):
+                example = preset["computer_example"]
+                example_memory = example.get("default_memory_kb_per_machine", "")
+                computer_example_section = f"""
+### 0.6 Example target computer profile
+
+This is the kind of AiiDA computer profile you want to reach in the end:
+
+```text
+verdi computer show {example["label"]}
+---------------------------  ------------------------------------
+Label                        {example["label"]}
+Description                  {example["description"]}
+Hostname                     {preset["hostname"]}
+Transport type               {normalized_transport}
+Scheduler type               {normalized_scheduler}
+Work directory               {example["work_dir"]}
+Shebang                      #!/bin/bash
+Mpirun command               {example["mpirun_command"]}
+Default #procs/machine       {example["default_procs_per_machine"]}
+Default memory (kB)/machine  {example_memory}
+Prepend text                 {example["prepend_text"]}
+Append text
+---------------------------  ------------------------------------
+```
+"""
+            code_examples_section = ""
+            if preset.get("code_examples"):
+                code_blocks: list[str] = []
+                for code_example in preset["code_examples"]:
+                    with_mpi_text = "True" if code_example["with_mpi"] else "False"
+                    code_blocks.append(
+                        f"""#### {code_example["title"]}
+
+```text
+Label                    {code_example["label"]}
+Default calc job plugin  {code_example["plugin"]}
+Description              {code_example["description"]}
+With mpi                 {with_mpi_text}
+Prepend text             {code_example["prepend_text"]}
+Filepath executable      {code_example["filepath_executable"]}
+```
+"""
+                    )
+                code_examples_section = (
+                    "\n### 0.7 Example code profiles\n\n"
+                    "Below are generalized examples of the code entries the user should create:\n\n"
+                    + "\n".join(code_blocks)
+                )
             preset_section = f"""
 ## 0. System-specific steps for `{system_preset}`
 
@@ -848,6 +1159,38 @@ which fleur
 ```
 
 Use the resulting absolute paths as `inpgen_executable_path` and `fleur_executable_path`.
+
+### 0.4 Choose a stable AiiDA work directory
+
+Pick a project-backed directory instead of a temporary location. Good patterns are:
+
+```bash
+# JURECA-style
+/p/project1/<project>/<user>/aiida
+
+# JUPITER-style
+/e/project1/<project>/<user>/aiida
+```
+
+### 0.5 Decide how you will provide FLEUR
+
+You have two common choices:
+
+1. Use a centrally installed module if available.
+2. Use your own build, for example via Spack, and point AiiDA to the absolute
+   executable path.
+
+If you use Spack, verify the environment before registering the codes:
+
+```bash
+source <spack_root>/share/spack/setup-env.sh
+spack env activate <your_fleur_env>
+spack load fleur
+which inpgen
+which fleur_MPI
+```
+{computer_example_section}
+{code_examples_section}
 """
 
         return f"""# AiiDA FLEUR Supercomputer Setup Guide
@@ -877,7 +1220,7 @@ verdi computer setup {quote_option} \\
   --scheduler {normalized_scheduler} \\
   --work-dir {self._shell_quote(work_dir)} \\
   --mpirun-command {self._shell_quote(mpirun_command)} \\
-{memory_line}  --prepend-text {prepend_arg} \\
+{command_memory_line}  --prepend-text {prepend_arg} \\
   --append-text {append_arg}
 ```
 
@@ -997,7 +1340,6 @@ Entrypoint: {spec["entrypoint"]}
 Docs: {workflow_link}
 """
 
-from pathlib import Path
 from pprint import pprint
 
 from aiida import load_profile, orm
@@ -1009,10 +1351,14 @@ from aiida_fleur.data import inpxml_changes
 from aiida_fleur.tools.plot import plot_fleur
 
 
+# This block is the main user-editable configuration.
+# Change workflow parameters, scheduler options, code labels, and magnetic
+# settings here before submission.
 CONFIG = {config_block}
 
 
 def make_structure_node():
+    """Load the structure file and convert it into an AiiDA StructureData node."""
     structure_path = CONFIG.get("structure_file")
     if not structure_path:
         return None
@@ -1024,14 +1370,17 @@ def make_structure_node():
 
 
 def maybe_dict_node(data):
+    """Wrap plain dictionaries as AiiDA Dict nodes only when needed."""
     return orm.Dict(dict=data) if data else None
 
 
 def build_common_options():
+    """Build the scheduler/resource options block used by FLEUR runs."""
     return orm.Dict(dict=CONFIG["options"])
 
 
 def apply_basic_magnetism(wf_parameters):
+    """Inject simple magnetic and SOC related inp.xml changes into wf_parameters."""
     magnetism = CONFIG.get("magnetism", {{}})
     if not magnetism:
         return wf_parameters
@@ -1066,6 +1415,7 @@ def apply_basic_magnetism(wf_parameters):
 
 
 def build_scf_namespace(include_structure):
+    """Create the SCF namespace used by nested workflows such as EOS or relax."""
     namespace = {{}}
     if include_structure:
         structure = make_structure_node()
@@ -1089,6 +1439,7 @@ def build_scf_namespace(include_structure):
 
 
 def build_direct_builder():
+    """Build workflows that accept structure/inpgen/fleur directly at top level."""
     WorkChain = WorkflowFactory(CONFIG["entrypoint"])
     builder = WorkChain.get_builder()
 
@@ -1113,6 +1464,7 @@ def build_direct_builder():
 
 
 def build_nested_scf_builder():
+    """Build workflows that contain a nested SCF namespace."""
     WorkChain = WorkflowFactory(CONFIG["entrypoint"])
     builder = WorkChain.get_builder()
 
@@ -1130,6 +1482,7 @@ def build_nested_scf_builder():
 
 
 def build_nested_scf_with_final_builder():
+    """Build workflows such as relax that use SCF and optional final SCF steps."""
     WorkChain = WorkflowFactory(CONFIG["entrypoint"])
     builder = WorkChain.get_builder()
     builder.scf = build_scf_namespace(include_structure=True)
@@ -1147,6 +1500,7 @@ def build_nested_scf_with_final_builder():
 
 
 def build_banddos_like_builder():
+    """Build post-SCF workflows such as band, DOS, MAE, DMI, or SSDisp."""
     WorkChain = WorkflowFactory(CONFIG["entrypoint"])
     builder = WorkChain.get_builder()
     builder.fleur = orm.load_code(CONFIG["fleur_code"])
@@ -1163,6 +1517,7 @@ def build_banddos_like_builder():
 
 
 def build_create_magnetic_builder():
+    """Build the magnetic-film preparation workflow and its nested namespaces."""
     WorkChain = WorkflowFactory(CONFIG["entrypoint"])
     builder = WorkChain.get_builder()
 
@@ -1187,6 +1542,7 @@ def build_create_magnetic_builder():
 
 
 def build_builder():
+    """Dispatch to the correct builder layout for the selected workflow."""
     pattern = CONFIG["pattern"]
     if pattern == "direct":
         return build_direct_builder()
@@ -1202,12 +1558,21 @@ def build_builder():
 
 
 def main():
+    # 1. Load the local AiiDA profile so `orm.load_code`, `submit`, and
+    # `run_get_node` work against the configured database.
     load_profile()
+
+    # 2. Build the exact AiiDA builder for the selected aiida-fleur workflow.
     builder = build_builder()
+
+    # 3. Print the final configuration so the user can verify all settings
+    # before or after submission.
     print(f"Launching {{CONFIG['workflow']}} workflow for {{CONFIG['material']}}")
     pprint(CONFIG)
 
     if CONFIG["submit_mode"] == "run_get_node":
+        # 4a. `run_get_node` blocks until the workflow finishes and is useful
+        # for small tests or interactive debugging.
         results, node = run_get_node(builder)
         print(f"Finished with PK: {{node.pk}}")
         print(f"State: {{node.process_state}}")
@@ -1215,6 +1580,8 @@ def main():
             plot_fleur(node)
         return results, node
 
+    # 4b. `submit` sends the workflow to the AiiDA daemon and returns
+    # immediately. This is the usual submission mode on clusters.
     node = submit(builder)
     print(f"Submitted PK: {{node.pk}}")
     print("Monitor with: verdi process show", node.pk)
@@ -1278,6 +1645,67 @@ if __name__ == "__main__":
             "- Inspection and summary of process outputs, output nodes, and workflow status.\n"
             "- Generation of plotting scripts for aiida-fleur results using `plot_fleur`.\n"
             "- Generation of workflow runner scripts in the workspace."
+        )
+
+    @staticmethod
+    def _server_overview_text() -> str:
+        return (
+            f"{SERVER_TITLE}\n\n"
+            f"Author: {SERVER_AUTHOR}\n"
+            f"Version: {SERVER_VERSION}\n\n"
+            "This MCP server is organized to help users work with aiida-fleur in a practical way.\n\n"
+            "It is mainly for:\n"
+            "- learning what each aiida-fleur workflow does\n"
+            "- setting up supercomputers, AiiDA computers, and FLEUR codes\n"
+            "- generating exact workflow and submission scripts\n"
+            "- executing workflows and inspecting outputs\n\n"
+            "Suggested order for new users:\n"
+            "1. Read the overview and server functions.\n"
+            "2. Read the workflow or setup guide.\n"
+            "3. Ask for a workflow explanation or setup guide.\n"
+            "4. Generate a submission script.\n"
+            "5. Run and monitor the calculation.\n\n"
+            "Main discovery tools:\n"
+            "- `describe_server_functions`\n"
+            "- `list_fleur_workflows`\n"
+            "- `explain_fleur_workflow`\n"
+            "- `generate_aiida_setup_guide`\n"
+            "- `generate_fleur_submission_script`\n"
+            "- `execute_fleur_workflow_script`\n"
+            "- `inspect_aiida_outputs`\n"
+        )
+
+    @staticmethod
+    def _client_usage_policy_text() -> str:
+        return (
+            "Recommended client usage policy for this MCP server:\n\n"
+            "- Use this MCP server as the primary tool for FLEUR setup, workflow explanation, workflow script generation, execution, monitoring, and output inspection.\n"
+            "- Ask the user only for information that is strictly required for the selected tool or workflow.\n"
+            "- If some required fields are missing, request only those missing fields and nothing extra.\n"
+            "- Do not display chain-of-thought or internal reasoning.\n"
+            "- Respond with concise, task-focused output: required questions first, final result second.\n"
+            "- Prefer returning generated scripts, setup steps, process summaries, and workflow explanations directly from this server instead of broad general discussion.\n"
+            "- When the server already provides an explanation or summary tool, use that tool instead of composing a longer answer manually.\n"
+            "- When the user asks for a submission script, prefer the annotated submission script function so the result includes notes for each important block.\n\n"
+            "Important note:\n"
+            "- This policy is a recommendation for the MCP client or assistant prompt. The MCP server can provide it, but cannot by itself force the client to hide reasoning or forbid other tools."
+        )
+
+    def _workflow_explanation_text(self, workflow: str) -> str:
+        spec = WORKFLOW_SPECS[workflow]
+        teaching = WORKFLOW_TEACHING[workflow]
+        main_inputs = "\n".join(f"- {item}" for item in teaching["main_inputs"])
+        main_outputs = "\n".join(f"- {item}" for item in teaching["main_outputs"])
+        return (
+            f"Workflow: {workflow}\n\n"
+            f"Entry point: `{spec['entrypoint']}`\n"
+            f"Pattern: `{spec['pattern']}`\n"
+            f"Documentation: {WORKFLOW_DOC_LINKS[workflow]}\n\n"
+            f"What it does:\n{teaching['what']}\n\n"
+            f"When to use it:\n{teaching['when']}\n\n"
+            f"How it works:\n{teaching['how']}\n\n"
+            f"Main inputs:\n{main_inputs}\n\n"
+            f"Main outputs:\n{main_outputs}"
         )
 
     @staticmethod
@@ -1521,6 +1949,12 @@ if __name__ == "__main__":
             return types.ListResourcesResult(
                 resources=[
                     types.Resource(
+                        uri="fleur://docs/overview",
+                        name="FLEUR Server Overview",
+                        description="Welcome page with purpose, author, and suggested usage order for the server.",
+                        mimeType="text/markdown",
+                    ),
+                    types.Resource(
                         uri="fleur://docs/workflow_guide",
                         name="FLEUR Workflow Guide",
                         description="Overview of supported aiida-fleur workflows and script generator conventions.",
@@ -1532,6 +1966,12 @@ if __name__ == "__main__":
                         description="How to configure AiiDA supercomputers and register inpgen/fleur codes.",
                         mimeType="text/markdown",
                     ),
+                    types.Resource(
+                        uri="fleur://docs/client_policy",
+                        name="FLEUR Client Usage Policy",
+                        description="Recommended instructions for a client like Claude: use this server first, ask only for required fields, and return concise outputs without showing internal reasoning.",
+                        mimeType="text/markdown",
+                    ),
                 ]
             )
 
@@ -1539,10 +1979,14 @@ if __name__ == "__main__":
             _context: Any,
             params: types.ReadResourceRequestParams,
         ) -> types.ReadResourceResult:
-            if params.uri == "fleur://docs/workflow_guide":
+            if params.uri == "fleur://docs/overview":
+                text = self._server_overview_text()
+            elif params.uri == "fleur://docs/workflow_guide":
                 text = self._load_template("fleur_workflow_server_guide.md")
             elif params.uri == "fleur://docs/setup_guide":
                 text = self._load_template("fleur_setup_server_guide.md")
+            elif params.uri == "fleur://docs/client_policy":
+                text = self._client_usage_policy_text()
             else:
                 raise ValueError(f"Unknown resource: {params.uri}")
 
@@ -1563,8 +2007,18 @@ if __name__ == "__main__":
             return types.ListToolsResult(
                 tools=[
                     types.Tool(
+                        name="get_server_overview",
+                        description="Return a welcome/overview text with author information and suggested usage order.",
+                        inputSchema={"type": "object", "properties": {}, "required": []},
+                    ),
+                    types.Tool(
                         name="describe_server_functions",
                         description="Return the functions of this server as a bullet list.",
+                        inputSchema={"type": "object", "properties": {}, "required": []},
+                    ),
+                    types.Tool(
+                        name="get_client_usage_policy",
+                        description="Return recommended client instructions: use this server first, ask only for required fields, and avoid showing internal reasoning.",
                         inputSchema={"type": "object", "properties": {}, "required": []},
                     ),
                     types.Tool(
@@ -1573,8 +2027,18 @@ if __name__ == "__main__":
                         inputSchema={"type": "object", "properties": {}, "required": []},
                     ),
                     types.Tool(
+                        name="explain_fleur_workflow",
+                        description="Explain what a selected aiida-fleur workflow does, when to use it, how it works, and what inputs/outputs to expect.",
+                        inputSchema=self._workflow_explanation_schema(),
+                    ),
+                    types.Tool(
                         name="generate_fleur_workflow_script",
-                        description="Generate a runnable Python script for a selected aiida-fleur workflow.",
+                        description="Generate a runnable annotated Python workflow/submission script for a selected aiida-fleur workflow.",
+                        inputSchema=self._workflow_schema(),
+                    ),
+                    types.Tool(
+                        name="generate_fleur_submission_script",
+                        description="Generate an exact annotated submission script with notes explaining what each block does.",
                         inputSchema=self._workflow_schema(),
                     ),
                     types.Tool(
@@ -1621,11 +2085,19 @@ if __name__ == "__main__":
         ) -> types.CallToolResult:
             arguments = params.arguments or {}
 
-            if params.name == "describe_server_functions":
+            if params.name == "get_server_overview":
+                content = [types.TextContent(type="text", text=self._server_overview_text())]
+            elif params.name == "describe_server_functions":
                 content = [types.TextContent(type="text", text=self._server_functions_text())]
+            elif params.name == "get_client_usage_policy":
+                content = [types.TextContent(type="text", text=self._client_usage_policy_text())]
             elif params.name == "list_fleur_workflows":
                 content = await self.list_fleur_workflows()
+            elif params.name == "explain_fleur_workflow":
+                content = await self.explain_fleur_workflow(**arguments)
             elif params.name == "generate_fleur_workflow_script":
+                content = await self.generate_fleur_workflow_script(**arguments)
+            elif params.name == "generate_fleur_submission_script":
                 content = await self.generate_fleur_workflow_script(**arguments)
             elif params.name == "generate_fleur_plot_script":
                 content = await self.generate_fleur_plot_script(**arguments)
@@ -1660,6 +2132,14 @@ if __name__ == "__main__":
                 f"  docs: {WORKFLOW_DOC_LINKS[name]}"
             )
         return [types.TextContent(type="text", text="Supported workflows:\n\n" + "\n".join(lines))]
+
+    async def explain_fleur_workflow(self, workflow: str) -> list[types.TextContent]:
+        try:
+            if workflow not in WORKFLOW_SPECS:
+                raise ValueError(f"Unsupported workflow: {workflow}")
+            return [types.TextContent(type="text", text=self._workflow_explanation_text(workflow))]
+        except Exception as exc:
+            return [types.TextContent(type="text", text=f"Failed to explain workflow: {exc}")]
 
     async def generate_fleur_workflow_script(
         self,

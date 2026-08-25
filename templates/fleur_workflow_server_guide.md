@@ -1,6 +1,6 @@
 # FLEUR Workflow Server Guide
 
-This MCP server generates Python scripts for the/Users/abuawwad/Desktop/aiida-fleur-mcp/server.py main `aiida-fleur`
+This MCP server generates Python scripts for the main `aiida-fleur`
 workflows instead of producing only one narrow calculation template.
 
 ## What It Generates
@@ -14,6 +14,7 @@ workflows instead of producing only one narrow calculation template.
 - spin-spiral and DMI scripts
 - magnetic film setup scripts
 - plotting scripts using `plot_fleur`
+- workflow explanations for teaching users what each workflow does
 
 ## Magnetic Helper
 
@@ -30,6 +31,7 @@ workflow-specific `wf_parameters` and manual refinement.
 ## Recommended Usage
 
 1. Call `list_fleur_workflows`.
-2. Generate the workflow script you need.
-3. Edit the produced dictionaries if you want more precise FLEUR settings.
-4. Run the script with your configured AiiDA profile.
+2. Call `explain_fleur_workflow` for the workflow you want to learn.
+3. Generate the workflow script you need.
+4. Edit the produced dictionaries if you want more precise FLEUR settings.
+5. Run the script with your configured AiiDA profile.
