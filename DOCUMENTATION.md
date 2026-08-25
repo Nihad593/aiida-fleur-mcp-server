@@ -18,6 +18,13 @@
 2. Open [docs/USER_GUIDE.md](docs/USER_GUIDE.md)
 3. Use the template guides when you want more detail
 
+## Who This Documentation Is For
+
+- FZJ users working on `jureca`, `juwels-cluster`, `juwels-booster`, or `jupiter`
+- users outside FZJ who want to adapt the same AiiDA and FLEUR setup pattern
+- new users who need workflow explanations before running calculations
+- experienced users who want exact submission scripts and setup commands
+
 ## Quick Questions To Ask The Server
 
 - `What does this server do?`

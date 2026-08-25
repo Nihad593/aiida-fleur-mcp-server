@@ -116,6 +116,9 @@ Current presets:
 - `juwels-booster`
 - `jupiter`
 
+The documentation also explains how to adapt the same setup logic for users
+outside Forschungszentrum Juelich and outside FZJ systems.
+
 > [!IMPORTANT]
 > Setup guides use generalized placeholders such as `<project>` and `<user>`
 > so users can safely adapt them to their own account.
@@ -173,6 +176,8 @@ The server also exposes internal MCP resources:
 - `Show me how to set up JURECA for aiida-fleur`
 - `Explain how to register inpgen and fleur on JUPITER`
 - `Generate a setup guide for JUWELS Cluster`
+- `Show me how to adapt this setup for my university cluster`
+- `I am outside FZJ, how should I configure my computer and codes?`
 
 ### Workflow Learning
 
@@ -244,6 +249,8 @@ python3 server.py
   `inp.xml` editing.
 - The setup application tool changes local AiiDA configuration, so users should
   review the preview before applying changes.
+- FZJ machines are provided as strong examples, but the same setup ideas also
+  apply to other SLURM, PBS, and LSF-based clusters.
 - The client usage policy is advisory. The server can recommend a style of use,
   but cannot technically force a client to hide reasoning or disable other
   tools.

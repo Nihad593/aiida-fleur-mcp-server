@@ -166,7 +166,47 @@ These presets help the user learn:
 > `<absolute_path_to_inpgen>`, and `<absolute_path_to_fleur_or_fleur_MPI>` so the
 > documentation stays general and safe to reuse.
 
-## 6. Submission Scripts
+## 6. For Users Outside FZJ
+
+> [!NOTE]
+> You do not need to be at FZJ to use this server. JURECA, JUWELS, and JUPITER
+> are example targets, but the same AiiDA concepts apply to many HPC systems.
+
+If you are working on a different supercomputer, the main things you need are:
+
+- the login hostname
+- the scheduler type such as `slurm`, `pbspro`, `torque`, or `lsf`
+- the transport type, usually SSH
+- the work directory where AiiDA can write jobs
+- the MPI launch command such as `srun`, `mpirun`, or `mpiexec`
+- the module loads or environment activation steps
+- the absolute executable path for `inpgen`
+- the absolute executable path for `fleur` or `fleur_MPI`
+
+### Generic cluster families
+
+| Cluster type | Common AiiDA scheduler | Common launch command |
+| --- | --- | --- |
+| SLURM clusters | `core.slurm` | `srun` or `mpirun` |
+| PBS/Torque clusters | `core.pbspro` or `core.torque` | `mpirun` |
+| LSF clusters | `core.lsf` | `mpirun` or site-specific launcher |
+
+### Generic adaptation pattern
+
+1. Ask your HPC support team which scheduler the machine uses.
+2. Check how users normally load compilers, MPI, and HDF5.
+3. Confirm whether `fleur` is installed through modules, Spack, or a local build.
+4. Find the real executable paths with commands like `which inpgen` and `which fleur_MPI`.
+5. Map those values into the server-generated setup commands.
+
+### Good questions for non-FZJ users
+
+- `Show me how to adapt the JURECA setup to a normal SLURM cluster`
+- `Generate a generic aiida-fleur setup guide for a PBS cluster`
+- `What information do I need before registering inpgen and fleur on my HPC system?`
+- `Explain how to configure AiiDA for a cluster outside FZJ`
+
+## 7. Submission Scripts
 
 The generated submission scripts are designed to be teachable.
 
@@ -183,7 +223,7 @@ They include commented blocks for:
 > [!TIP]
 > This means the scripts are useful both as runnable files and as learning material.
 
-## 7. Execution And Results
+## 8. Execution And Results
 
 The server can help with:
 
@@ -195,7 +235,7 @@ The server can help with:
 
 This lets the user go beyond setup and generation into real workflow handling.
 
-## 8. Limitations
+## 9. Limitations
 
 > [!WARNING]
 > The server helps with workflow usage and setup, but it does not replace scientific judgment.
@@ -204,7 +244,7 @@ This lets the user go beyond setup and generation into real workflow handling.
 - The client usage policy is only a recommendation; it cannot force a client to
   hide chain-of-thought or disable other tools.
 
-## 9. Running The Server
+## 10. Running The Server
 
 ```bash
 cd /absolute/path/to/aiida-fleur-mcp
@@ -212,7 +252,7 @@ source .venv/bin/activate
 python3 server.py
 ```
 
-## 10. Best Starting Questions
+## 11. Best Starting Questions
 
 If the user is new, these are good first questions:
 
@@ -220,5 +260,6 @@ If the user is new, these are good first questions:
 - `List the functions of this server`
 - `Explain the scf workflow`
 - `Show me how to set up JURECA`
+- `I am outside FZJ, how should I set up my cluster?`
 - `Generate a submission script for a DOS calculation`
 - `How do I run and monitor the workflow?`
